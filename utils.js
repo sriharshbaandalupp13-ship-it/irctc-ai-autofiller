@@ -13,7 +13,8 @@
     RUNTIME_STATUS: "runtimeStatus",
     LATEST_RECOMMENDATION: "latestRecommendation",
     PENDING_AVAILABILITY_REQUEST: "pendingAvailabilityRequest",
-    SIDEBAR_STATE: "sidebarState"
+    SIDEBAR_STATE: "sidebarState",
+    QUICK_WIDGET_SETTINGS: "quickWidgetSettings"
   };
 
   const DEFAULT_PREFERENCES = {
@@ -24,6 +25,14 @@
     preferredCoach: "",
     reservationChoice: "",
     fallbackMobile: ""
+  };
+
+  const DEFAULT_QUICK_WIDGET_SETTINGS = {
+    selectionMode: "family",
+    favoriteFromStation: "",
+    favoriteToStation: "",
+    favoriteGroupId: "",
+    favoritePassengerId: ""
   };
 
   const QUOTAS = [
@@ -176,7 +185,8 @@
       STORAGE_KEYS.JOURNEY_DRAFT,
       STORAGE_KEYS.ACTIVE_BOOKING,
       STORAGE_KEYS.RUNTIME_STATUS,
-      STORAGE_KEYS.LATEST_RECOMMENDATION
+      STORAGE_KEYS.LATEST_RECOMMENDATION,
+      STORAGE_KEYS.QUICK_WIDGET_SETTINGS
     ]);
 
     return {
@@ -194,7 +204,11 @@
       journeyDraft: data[STORAGE_KEYS.JOURNEY_DRAFT] || null,
       activeBooking: data[STORAGE_KEYS.ACTIVE_BOOKING] || null,
       runtimeStatus: data[STORAGE_KEYS.RUNTIME_STATUS] || null,
-      latestRecommendation: data[STORAGE_KEYS.LATEST_RECOMMENDATION] || null
+      latestRecommendation: data[STORAGE_KEYS.LATEST_RECOMMENDATION] || null,
+      quickWidgetSettings: {
+        ...clone(DEFAULT_QUICK_WIDGET_SETTINGS),
+        ...(data[STORAGE_KEYS.QUICK_WIDGET_SETTINGS] || {})
+      }
     };
   }
 
@@ -386,6 +400,7 @@
   globalThis.IRCTCUtils = {
     STORAGE_KEYS,
     DEFAULT_PREFERENCES,
+    DEFAULT_QUICK_WIDGET_SETTINGS,
     QUOTAS,
     JOURNEY_CLASSES,
     PAYMENT_MODES,

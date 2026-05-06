@@ -72,7 +72,8 @@
   const contentState = {
     activeConfig: null,
     widgetMounted: false,
-    observerStarted: false
+    observerStarted: false,
+    widgetData: null
   };
 
   init();
@@ -86,13 +87,14 @@
 
   async function init() {
     mountAssistantWidget();
+    await loadWidgetState();
     await notifyPageReady();
     observeUrlChanges();
-    if (location.href.startsWith(IRCTC_URLS.TRAIN_LIST)) {
+    if (isTrainListPage(location.href)) {
       await showReadyBadge();
       await maybeGenerateTrainRecommendation();
     }
-    if (location.href.startsWith(IRCTC_URLS.PAYMENT)) {
+    if (isPaymentPage(location.href)) {
       await showPaymentToast();
       await reportBookingCompleted();
     }
@@ -108,12 +110,13 @@
       if (location.href !== lastHref) {
         lastHref = location.href;
         mountAssistantWidget();
+        await loadWidgetState();
         await notifyPageReady();
-        if (location.href.startsWith(IRCTC_URLS.TRAIN_LIST)) {
+        if (isTrainListPage(location.href)) {
           await showReadyBadge();
           await maybeGenerateTrainRecommendation();
         }
-        if (location.href.startsWith(IRCTC_URLS.PAYMENT)) {
+        if (isPaymentPage(location.href)) {
           await showPaymentToast();
           await reportBookingCompleted();
         }
@@ -796,11 +799,40 @@
         </div>
         <div class="irctc-autofill-body">
           <p id="irctc-autofill-status">${escapeHtml(widgetMessageForPage())}</p>
+          <div class="irctc-autofill-route-grid">
+            <label>
+              <span>Fav Departure</span>
+              <input id="irctc-widget-from" type="text" list="irctc-autofill-stations-list" placeholder="NDLS - New Delhi">
+            </label>
+            <label>
+              <span>Fav Arrival</span>
+              <input id="irctc-widget-to" type="text" list="irctc-autofill-stations-list" placeholder="BCT - Mumbai Central">
+            </label>
+          </div>
+          <div class="irctc-autofill-mode-buttons">
+            <button type="button" id="irctc-widget-family-btn" class="irctc-widget-chip">Select Family</button>
+            <button type="button" id="irctc-widget-single-btn" class="irctc-widget-chip">Select Single Member</button>
+          </div>
+          <div class="irctc-autofill-route-grid">
+            <label>
+              <span>Family Group</span>
+              <select id="irctc-widget-group"></select>
+            </label>
+            <label>
+              <span>Single Member</span>
+              <select id="irctc-widget-passenger"></select>
+            </label>
+          </div>
           <div class="irctc-autofill-mini-actions">
+            <button type="button" id="irctc-widget-save">Save Favorites</button>
             <button type="button" id="irctc-autofill-open-options">Manage Profiles</button>
+          </div>
+          <div class="irctc-autofill-primary-actions">
+            <button type="button" id="irctc-widget-start" class="irctc-widget-start">Start Job</button>
           </div>
         </div>
       </div>
+      <datalist id="irctc-autofill-stations-list"></datalist>
     `;
 
     const style = document.createElement("style");
@@ -813,7 +845,7 @@
         font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
       }
       .irctc-autofill-card {
-        width: 280px;
+        width: 340px;
         border-radius: 18px;
         background: linear-gradient(180deg, rgba(26, 35, 126, 0.96), rgba(26, 35, 126, 0.82));
         color: #fff;
@@ -844,9 +876,74 @@
         font-size: 12px;
         line-height: 1.45;
       }
+      .irctc-autofill-route-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .irctc-autofill-route-grid label {
+        display: block;
+      }
+      .irctc-autofill-route-grid span {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 11px;
+        opacity: 0.82;
+      }
+      .irctc-autofill-route-grid input,
+      .irctc-autofill-route-grid select {
+        width: 100%;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.12);
+        color: #fff;
+        padding: 8px 10px;
+        font-size: 12px;
+      }
+      .irctc-autofill-route-grid input::placeholder {
+        color: rgba(255,255,255,0.72);
+      }
+      .irctc-autofill-mode-buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .irctc-widget-chip {
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 999px;
+        background: rgba(255,255,255,0.08);
+        color: #fff;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .irctc-widget-chip.active {
+        background: rgba(255, 109, 0, 0.88);
+        border-color: rgba(255, 109, 0, 1);
+      }
       .irctc-autofill-mini-actions {
         display: flex;
-        justify-content: flex-end;
+        gap: 8px;
+        justify-content: space-between;
+        margin-bottom: 10px;
+      }
+      .irctc-autofill-primary-actions {
+        display: flex;
+      }
+      .irctc-widget-start {
+        width: 100%;
+        border: 0;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #ff6d00, #ff8f3a);
+        color: #fff;
+        padding: 11px 12px;
+        font-size: 14px;
+        font-weight: 800;
+        cursor: pointer;
+        box-shadow: 0 12px 24px rgba(255, 109, 0, 0.24);
       }
       #irctc-autofill-widget.minimized .irctc-autofill-body {
         display: none;
@@ -862,7 +959,202 @@
     widget.querySelector("#irctc-autofill-open-options").addEventListener("click", async () => {
       await safeSendRuntimeMessage({ type: "OPEN_OPTIONS" });
     });
+    widget.querySelector("#irctc-widget-save").addEventListener("click", saveWidgetPreferences);
+    widget.querySelector("#irctc-widget-start").addEventListener("click", startWidgetBooking);
+    widget.querySelector("#irctc-widget-family-btn").addEventListener("click", () => setWidgetMode("family"));
+    widget.querySelector("#irctc-widget-single-btn").addEventListener("click", () => setWidgetMode("single"));
     contentState.widgetMounted = true;
+  }
+
+  async function loadWidgetState() {
+    const response = await safeSendRuntimeMessage({ type: "GET_EXTENSION_STATE" });
+    if (!response?.ok) {
+      return;
+    }
+
+    contentState.widgetData = {
+      passengers: response.passengers || [],
+      groups: response.groups || [],
+      savedStations: response.savedStations || [],
+      journeyDraft: response.journeyDraft || null,
+      defaultPreferences: response.defaultPreferences || {},
+      quickWidgetSettings: response.quickWidgetSettings || {}
+    };
+
+    renderWidgetControls();
+    updateWidgetStatus("ready", widgetMessageForPage());
+  }
+
+  function renderWidgetControls() {
+    const widget = document.getElementById("irctc-autofill-widget");
+    if (!widget || !contentState.widgetData) {
+      return;
+    }
+
+    const { passengers, groups, savedStations, journeyDraft, quickWidgetSettings } = contentState.widgetData;
+    const fromInput = widget.querySelector("#irctc-widget-from");
+    const toInput = widget.querySelector("#irctc-widget-to");
+    const groupSelect = widget.querySelector("#irctc-widget-group");
+    const passengerSelect = widget.querySelector("#irctc-widget-passenger");
+    const stationsList = widget.querySelector("#irctc-autofill-stations-list");
+
+    fromInput.value = quickWidgetSettings.favoriteFromStation || journeyDraft?.fromStation || "";
+    toInput.value = quickWidgetSettings.favoriteToStation || journeyDraft?.toStation || "";
+
+    stationsList.innerHTML = "";
+    savedStations.forEach((station) => {
+      const option = document.createElement("option");
+      option.value = station;
+      stationsList.appendChild(option);
+    });
+
+    groupSelect.innerHTML = "";
+    passengerSelect.innerHTML = "";
+    appendSelectOption(groupSelect, "", "Choose family group");
+    appendSelectOption(passengerSelect, "", "Choose single member");
+
+    groups.forEach((group) => appendSelectOption(groupSelect, group.id, group.name));
+    passengers.forEach((passenger) => appendSelectOption(passengerSelect, passenger.id, passenger.fullName));
+
+    groupSelect.value = quickWidgetSettings.favoriteGroupId || groups.find((group) => /family/i.test(group.name))?.id || "";
+    passengerSelect.value = quickWidgetSettings.favoritePassengerId || passengers[0]?.id || "";
+
+    setWidgetMode(quickWidgetSettings.selectionMode || "family", { persist: false });
+  }
+
+  function appendSelectOption(select, value, label) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
+  }
+
+  function setWidgetMode(mode, options = {}) {
+    const { persist = true } = options;
+    const familyButton = document.getElementById("irctc-widget-family-btn");
+    const singleButton = document.getElementById("irctc-widget-single-btn");
+    const groupSelect = document.getElementById("irctc-widget-group");
+    const passengerSelect = document.getElementById("irctc-widget-passenger");
+
+    familyButton?.classList.toggle("active", mode === "family");
+    singleButton?.classList.toggle("active", mode === "single");
+
+    if (groupSelect) {
+      groupSelect.disabled = mode !== "family";
+      groupSelect.style.opacity = mode === "family" ? "1" : "0.55";
+    }
+    if (passengerSelect) {
+      passengerSelect.disabled = mode !== "single";
+      passengerSelect.style.opacity = mode === "single" ? "1" : "0.55";
+    }
+
+    if (contentState.widgetData) {
+      contentState.widgetData.quickWidgetSettings = {
+        ...(contentState.widgetData.quickWidgetSettings || {}),
+        selectionMode: mode
+      };
+    }
+
+    if (persist) {
+      saveWidgetPreferences({ silent: true });
+    }
+  }
+
+  async function saveWidgetPreferences(options = {}) {
+    const { silent = false } = options;
+    const widget = document.getElementById("irctc-autofill-widget");
+    if (!widget || !contentState.widgetData) {
+      return;
+    }
+
+    const payload = {
+      selectionMode: contentState.widgetData.quickWidgetSettings?.selectionMode || "family",
+      favoriteFromStation: widget.querySelector("#irctc-widget-from")?.value.trim() || "",
+      favoriteToStation: widget.querySelector("#irctc-widget-to")?.value.trim() || "",
+      favoriteGroupId: widget.querySelector("#irctc-widget-group")?.value || "",
+      favoritePassengerId: widget.querySelector("#irctc-widget-passenger")?.value || ""
+    };
+
+    const response = await safeSendRuntimeMessage({
+      type: "SAVE_QUICK_WIDGET_SETTINGS",
+      payload
+    });
+
+    if (response?.ok) {
+      contentState.widgetData.quickWidgetSettings = response.quickWidgetSettings || payload;
+      contentState.widgetData.savedStations = response.savedStations || contentState.widgetData.savedStations;
+      renderWidgetControls();
+      if (!silent) {
+        updateWidgetStatus("ready", "Favorites saved. Start Job will use these quick settings.");
+      }
+    }
+  }
+
+  async function startWidgetBooking() {
+    if (!isSearchPage(location.href)) {
+      updateWidgetStatus("error", "Start Job works from the IRCTC search page.");
+      return;
+    }
+
+    await saveWidgetPreferences({ silent: true });
+    const widget = document.getElementById("irctc-autofill-widget");
+    const quickSettings = contentState.widgetData?.quickWidgetSettings || {};
+    const groups = contentState.widgetData?.groups || [];
+    const passengers = contentState.widgetData?.passengers || [];
+    const journeyDraft = contentState.widgetData?.journeyDraft || {};
+    const defaultPreferences = contentState.widgetData?.defaultPreferences || {};
+
+    const fromStation = widget.querySelector("#irctc-widget-from")?.value.trim() || journeyDraft.fromStation || "";
+    const toStation = widget.querySelector("#irctc-widget-to")?.value.trim() || journeyDraft.toStation || "";
+    const selectionMode = quickSettings.selectionMode || "family";
+
+    let selectedPassengerIds = [];
+    if (selectionMode === "family") {
+      const group = groups.find((entry) => entry.id === (widget.querySelector("#irctc-widget-group")?.value || quickSettings.favoriteGroupId));
+      selectedPassengerIds = group?.passengerIds || [];
+    } else {
+      const passengerId = widget.querySelector("#irctc-widget-passenger")?.value || quickSettings.favoritePassengerId;
+      selectedPassengerIds = passengerId ? [passengerId] : [];
+    }
+
+    selectedPassengerIds = selectedPassengerIds.filter((id) => passengers.some((passenger) => passenger.id === id)).slice(0, 6);
+
+    if (!fromStation || !toStation) {
+      updateWidgetStatus("error", "Add favorite departure and arrival before starting.");
+      return;
+    }
+
+    if (!selectedPassengerIds.length) {
+      updateWidgetStatus("error", selectionMode === "family" ? "Choose a family group with passengers." : "Choose a single passenger before starting.");
+      return;
+    }
+
+    const payload = {
+      fromStation,
+      toStation,
+      journeyDate: journeyDraft.journeyDate || IRCTCUtils.todayISO(),
+      journeyClass: journeyDraft.journeyClass || "3A",
+      quota: journeyDraft.quota || "General",
+      passengerCount: selectedPassengerIds.length,
+      selectedPassengerIds,
+      preferences: {
+        ...defaultPreferences,
+        ...(journeyDraft.preferences || {})
+      },
+      tatkalRushMode: Boolean(journeyDraft.tatkalRushMode)
+    };
+
+    await safeSendRuntimeMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
+    const response = await safeSendRuntimeMessage({
+      type: "START_BOOKING_FLOW",
+      payload
+    });
+
+    if (response?.ok) {
+      updateWidgetStatus("active", `Starting quick booking for ${fromStation} -> ${toStation}...`);
+    } else {
+      updateWidgetStatus("error", response?.error || "Could not start the booking job.");
+    }
   }
 
   function updateWidgetStatus(phase, message) {
@@ -875,16 +1167,16 @@
   }
 
   function widgetMessageForPage() {
-    if (location.href.startsWith(IRCTC_URLS.SEARCH)) {
-      return "Assistant ready on IRCTC search. Open the extension popup to start or save your booking setup.";
+    if (isSearchPage(location.href)) {
+      return "Assistant ready on IRCTC search. Use Start Job here for quick autofill.";
     }
-    if (location.href.startsWith(IRCTC_URLS.TRAIN_LIST)) {
+    if (isTrainListPage(location.href)) {
       return "AutoFill is ready — select your train and click Book Now.";
     }
-    if (location.href.startsWith(IRCTC_URLS.PAX_DETAILS)) {
+    if (isPaxDetailsPage(location.href)) {
       return "Passenger page detected. AutoFill will fill the form and pause before continuing.";
     }
-    if (location.href.startsWith(IRCTC_URLS.PAYMENT)) {
+    if (isPaymentPage(location.href)) {
       return "AutoFill complete — please proceed with payment.";
     }
     return "Assistant is active on IRCTC.";
@@ -1006,5 +1298,21 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function isSearchPage(url = "") {
+    return String(url).includes("/nget/train-search");
+  }
+
+  function isTrainListPage(url = "") {
+    return String(url).includes("/train-list");
+  }
+
+  function isPaxDetailsPage(url = "") {
+    return String(url).includes("/pax-details");
+  }
+
+  function isPaymentPage(url = "") {
+    return String(url).includes("/payment");
   }
 })();

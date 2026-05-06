@@ -165,6 +165,20 @@ select:focus {
   gap: 10px;
 }
 
+.quick-booking-block {
+  margin-top: 6px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(245, 247, 255, 0.92);
+}
+
+.quick-booking-block h3 {
+  margin: 0 0 12px;
+  color: var(--brand-blue);
+  font-size: 16px;
+}
+
 .primary,
 .secondary,
 .chip-button {

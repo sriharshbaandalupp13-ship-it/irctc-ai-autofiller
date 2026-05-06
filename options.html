@@ -131,6 +131,36 @@
               <span>Gemini API Key</span>
               <input id="geminiApiKey" type="password" placeholder="Stored locally in chrome.storage.local">
             </label>
+            <div class="quick-booking-block">
+              <h3>Quick Booking Favorites</h3>
+              <div class="grid two">
+                <label>
+                  <span>Favorite Departure</span>
+                  <input id="favoriteFromStation" type="text" placeholder="NDLS - New Delhi">
+                </label>
+                <label>
+                  <span>Favorite Arrival</span>
+                  <input id="favoriteToStation" type="text" placeholder="BCT - Mumbai Central">
+                </label>
+              </div>
+              <div class="grid two">
+                <label>
+                  <span>Default Family Group</span>
+                  <select id="favoriteGroupId"></select>
+                </label>
+                <label>
+                  <span>Default Single Member</span>
+                  <select id="favoritePassengerId"></select>
+                </label>
+              </div>
+              <label>
+                <span>Default Quick Mode</span>
+                <select id="selectionMode">
+                  <option value="family">Family</option>
+                  <option value="single">Single Member</option>
+                </select>
+              </label>
+            </div>
             <div class="form-actions">
               <button class="primary" type="submit">Save Preferences</button>
             </div>

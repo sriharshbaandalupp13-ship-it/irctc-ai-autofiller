@@ -42,7 +42,8 @@ chrome.runtime.onInstalled.addListener(async () => {
     [STORAGE_KEYS.GROUPS]: data.groups,
     [STORAGE_KEYS.SAVED_STATIONS]: data.savedStations,
     [STORAGE_KEYS.BOOKING_HISTORY]: data.bookingHistory,
-    [STORAGE_KEYS.AVAILABILITY_ALERTS]: data.availabilityAlerts
+    [STORAGE_KEYS.AVAILABILITY_ALERTS]: data.availabilityAlerts,
+    [STORAGE_KEYS.QUICK_WIDGET_SETTINGS]: data.quickWidgetSettings
   });
   await chrome.alarms.create(ALARM_NAMES.AVAILABILITY_POLL, { periodInMinutes: 30 });
 });
@@ -63,7 +64,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
-  if (tab.url.startsWith(IRCTC_URLS.SEARCH) || tab.url.startsWith(IRCTC_URLS.TRAIN_LIST) || tab.url.startsWith(IRCTC_URLS.PAX_DETAILS) || tab.url.startsWith(IRCTC_URLS.PAYMENT)) {
+  if (isSearchPage(tab.url) || isTrainListPage(tab.url) || isPaxDetailsPage(tab.url) || isPaymentPage(tab.url)) {
     await safeSendToTab(tabId, {
       type: "BACKGROUND_PAGE_READY",
       url: tab.url
@@ -173,6 +174,8 @@ async function handleMessage(message, sender) {
       return saveAvailabilityAlert(message.payload);
     case "DELETE_AVAILABILITY_ALERT":
       return deleteAvailabilityAlert(message.payload?.id);
+    case "SAVE_QUICK_WIDGET_SETTINGS":
+      return saveQuickWidgetSettings(message.payload);
     case "PAGE_READY":
       return handlePageReady(message.payload, sender);
     case "BOOKING_COMPLETED":
@@ -217,7 +220,8 @@ async function getPopupState() {
     runtimeStatus: data.runtimeStatus,
     tatkalRushConfig: data.tatkalRushConfig,
     availabilityAlerts: data.availabilityAlerts,
-    latestRecommendation: data.latestRecommendation
+    latestRecommendation: data.latestRecommendation,
+    quickWidgetSettings: data.quickWidgetSettings
   };
 }
 
@@ -434,6 +438,29 @@ async function deleteAvailabilityAlert(id) {
   return { availabilityAlerts: nextAlerts };
 }
 
+async function saveQuickWidgetSettings(payload) {
+  const data = await getDataBundle();
+  const nextSettings = {
+    ...data.quickWidgetSettings,
+    ...(payload || {})
+  };
+
+  const savedStations = IRCTCUtils.upsertSavedStations(data.savedStations, [
+    nextSettings.favoriteFromStation,
+    nextSettings.favoriteToStation
+  ]);
+
+  await setStorage({
+    [STORAGE_KEYS.QUICK_WIDGET_SETTINGS]: nextSettings,
+    [STORAGE_KEYS.SAVED_STATIONS]: savedStations
+  });
+
+  return {
+    quickWidgetSettings: nextSettings,
+    savedStations
+  };
+}
+
 async function handlePageReady(payload, sender) {
   const data = await getDataBundle();
   const activeBooking = data.activeBooking;
@@ -445,28 +472,28 @@ async function handlePageReady(payload, sender) {
   const tabId = sender.tab.id;
   const journeyConfig = activeBooking.journeyConfig;
 
-  if (payload.url.startsWith(IRCTC_URLS.SEARCH) && (activeBooking.mode === "booking" || activeBooking.mode === "availabilityCheck")) {
+  if (isSearchPage(payload.url) && (activeBooking.mode === "booking" || activeBooking.mode === "availabilityCheck")) {
     await safeSendToTab(tabId, {
       type: activeBooking.mode === "availabilityCheck" ? "RUN_AVAILABILITY_PAGE1" : "START_PAGE_AUTOMATION",
       journeyConfig
     });
   }
 
-  if (payload.url.startsWith(IRCTC_URLS.PAX_DETAILS) && activeBooking.mode === "booking") {
+  if (isPaxDetailsPage(payload.url) && activeBooking.mode === "booking") {
     await safeSendToTab(tabId, {
       type: "RUN_PAX_AUTOMATION",
       journeyConfig
     });
   }
 
-  if (payload.url.startsWith(IRCTC_URLS.TRAIN_LIST)) {
+  if (isTrainListPage(payload.url)) {
     await safeSendToTab(tabId, {
       type: activeBooking.mode === "availabilityCheck" ? "SCRAPE_AVAILABILITY_RESULTS" : "SHOW_READY_BADGE",
       journeyConfig
     });
   }
 
-  if (payload.url.startsWith(IRCTC_URLS.PAYMENT)) {
+  if (isPaymentPage(payload.url)) {
     await safeSendToTab(tabId, {
       type: "SHOW_PAYMENT_TOAST",
       journeyConfig
@@ -538,4 +565,20 @@ async function safeSendToTab(tabId, message) {
   } catch (error) {
     return null;
   }
+}
+
+function isSearchPage(url = "") {
+  return String(url).includes("/nget/train-search");
+}
+
+function isTrainListPage(url = "") {
+  return String(url).includes("/train-list");
+}
+
+function isPaxDetailsPage(url = "") {
+  return String(url).includes("/pax-details");
+}
+
+function isPaymentPage(url = "") {
+  return String(url).includes("/payment");
 }

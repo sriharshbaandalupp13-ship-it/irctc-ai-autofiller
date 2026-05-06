@@ -3,6 +3,7 @@
 (function () {
   const {
     STORAGE_KEYS,
+    DEFAULT_QUICK_WIDGET_SETTINGS,
     GENDERS,
     BERTH_PREFERENCES,
     ID_PROOF_TYPES,
@@ -17,7 +18,8 @@
     passengers: [],
     groups: [],
     defaultPreferences: { ...DEFAULT_PREFERENCES },
-    geminiApiKey: ""
+    geminiApiKey: "",
+    quickWidgetSettings: { ...DEFAULT_QUICK_WIDGET_SETTINGS }
   };
 
   const elements = {};
@@ -62,6 +64,11 @@
       "defaultReservationChoice",
       "fallbackMobile",
       "geminiApiKey",
+      "favoriteFromStation",
+      "favoriteToStation",
+      "favoriteGroupId",
+      "favoritePassengerId",
+      "selectionMode",
       "toast"
     ].forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -82,10 +89,12 @@
     state.groups = data.groups;
     state.defaultPreferences = data.defaultPreferences;
     state.geminiApiKey = data.geminiApiKey || "";
+    state.quickWidgetSettings = data.quickWidgetSettings || { ...DEFAULT_QUICK_WIDGET_SETTINGS };
     applyPreferences();
     renderProfiles();
     renderGroupMembers();
     renderGroups();
+    renderQuickBookingSelects();
   }
 
   function applyPreferences() {
@@ -97,6 +106,9 @@
     elements.defaultReservationChoice.value = state.defaultPreferences.reservationChoice || "";
     elements.fallbackMobile.value = state.defaultPreferences.fallbackMobile || "";
     elements.geminiApiKey.value = state.geminiApiKey;
+    elements.favoriteFromStation.value = state.quickWidgetSettings.favoriteFromStation || "";
+    elements.favoriteToStation.value = state.quickWidgetSettings.favoriteToStation || "";
+    elements.selectionMode.value = state.quickWidgetSettings.selectionMode || "family";
   }
 
   async function saveProfile(event) {
@@ -191,10 +203,22 @@
       fallbackMobile: elements.fallbackMobile.value.trim()
     };
     state.geminiApiKey = elements.geminiApiKey.value.trim();
+    state.quickWidgetSettings = {
+      selectionMode: elements.selectionMode.value,
+      favoriteFromStation: elements.favoriteFromStation.value.trim(),
+      favoriteToStation: elements.favoriteToStation.value.trim(),
+      favoriteGroupId: elements.favoriteGroupId.value,
+      favoritePassengerId: elements.favoritePassengerId.value
+    };
 
     await setStorage({
       [STORAGE_KEYS.DEFAULT_PREFERENCES]: state.defaultPreferences,
-      [STORAGE_KEYS.GEMINI_API_KEY]: state.geminiApiKey
+      [STORAGE_KEYS.GEMINI_API_KEY]: state.geminiApiKey,
+      [STORAGE_KEYS.QUICK_WIDGET_SETTINGS]: state.quickWidgetSettings,
+      [STORAGE_KEYS.SAVED_STATIONS]: IRCTCUtils.upsertSavedStations(
+        (await getDataBundle()).savedStations,
+        [state.quickWidgetSettings.favoriteFromStation, state.quickWidgetSettings.favoriteToStation]
+      )
     });
     showToast("Preferences saved locally.");
   }
@@ -239,6 +263,7 @@
 
       elements.profilesList.appendChild(item);
     });
+    renderQuickBookingSelects();
   }
 
   function fillProfileForm(profile) {
@@ -307,6 +332,27 @@
       });
       elements.groupsList.appendChild(item);
     });
+    renderQuickBookingSelects();
+  }
+
+  function renderQuickBookingSelects() {
+    seedSelect(
+      elements.favoriteGroupId,
+      [
+        { value: "", label: "Choose family group" },
+        ...state.groups.map((group) => ({ value: group.id, label: group.name }))
+      ],
+      state.quickWidgetSettings.favoriteGroupId || ""
+    );
+
+    seedSelect(
+      elements.favoritePassengerId,
+      [
+        { value: "", label: "Choose single member" },
+        ...state.passengers.map((passenger) => ({ value: passenger.id, label: passenger.fullName }))
+      ],
+      state.quickWidgetSettings.favoritePassengerId || ""
+    );
   }
 
   function fillGroupForm(group) {
@@ -329,9 +375,14 @@
     select.innerHTML = "";
     values.forEach((value) => {
       const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value;
-      if (value === selected) {
+      if (typeof value === "object") {
+        option.value = value.value;
+        option.textContent = value.label;
+      } else {
+        option.value = value;
+        option.textContent = value;
+      }
+      if (option.value === selected) {
         option.selected = true;
       }
       select.appendChild(option);
