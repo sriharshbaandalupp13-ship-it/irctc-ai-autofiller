@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRCTC AutoFill Assistant Options</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="page-hero">
+        <div>
+          <p class="eyebrow">Passenger Profile Manager</p>
+          <h1>IRCTC AutoFill Assistant</h1>
+          <p class="subtext">Manage passenger profiles, groups, default preferences, and your Gemini API key locally.</p>
+        </div>
+      </header>
+
+      <main class="page-grid">
+        <section class="card">
+          <div class="section-heading">
+            <h2>Create / Edit Passenger</h2>
+            <span id="profileCount" class="pill">0 / 10</span>
+          </div>
+          <form id="profileForm" class="form-grid">
+            <input id="profileId" type="hidden">
+            <label>
+              <span>Full Name</span>
+              <input id="fullName" type="text" required>
+            </label>
+            <div class="grid two">
+              <label>
+                <span>Age</span>
+                <input id="age" type="number" min="1" max="125" required>
+              </label>
+              <label>
+                <span>Gender</span>
+                <select id="gender"></select>
+              </label>
+            </div>
+            <div class="grid two">
+              <label>
+                <span>Berth Preference</span>
+                <select id="berthPreference"></select>
+              </label>
+              <label>
+                <span>ID Proof Type</span>
+                <select id="idProofType"></select>
+              </label>
+            </div>
+            <label>
+              <span>ID Proof Number</span>
+              <input id="idProofNumber" type="text" required>
+            </label>
+            <div class="form-actions">
+              <button id="saveProfileButton" class="primary" type="submit">Save Profile</button>
+              <button id="resetProfileButton" class="secondary" type="button">Reset</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Saved Passengers</h2>
+          </div>
+          <div id="profilesList" class="item-list empty-state">No passenger profiles yet.</div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Passenger Groups</h2>
+          </div>
+          <form id="groupForm" class="form-grid">
+            <input id="groupId" type="hidden">
+            <label>
+              <span>Group Name</span>
+              <input id="groupName" type="text" placeholder="Family">
+            </label>
+            <label>
+              <span>Members</span>
+              <div id="groupMembers" class="checkbox-grid empty-state">Create passenger profiles first.</div>
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">Save Group</button>
+              <button id="resetGroupButton" class="secondary" type="button">Reset</button>
+            </div>
+          </form>
+          <div id="groupsList" class="item-list empty-state">No groups saved.</div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <h2>Default Preferences</h2>
+          </div>
+          <form id="preferencesForm" class="form-grid">
+            <div class="grid two">
+              <label class="toggle-row">
+                <span>Travel Insurance</span>
+                <input id="defaultTravelInsurance" type="checkbox">
+              </label>
+              <label class="toggle-row">
+                <span>Auto Upgrade</span>
+                <input id="defaultAutoUpgrade" type="checkbox">
+              </label>
+            </div>
+            <div class="grid two">
+              <label class="toggle-row">
+                <span>Only Confirm Berths</span>
+                <input id="defaultOnlyConfirmBerths" type="checkbox">
+              </label>
+              <label>
+                <span>Payment Mode</span>
+                <select id="defaultPaymentMode"></select>
+              </label>
+            </div>
+            <div class="grid two">
+              <label>
+                <span>Preferred Coach</span>
+                <input id="defaultPreferredCoach" type="text" placeholder="B2">
+              </label>
+              <label>
+                <span>Reservation Choice</span>
+                <input id="defaultReservationChoice" type="text" placeholder="Optional">
+              </label>
+            </div>
+            <label>
+              <span>Fallback Mobile Number</span>
+              <input id="fallbackMobile" type="text" placeholder="Used only if IRCTC does not prefill mobile number">
+            </label>
+            <label>
+              <span>Gemini API Key</span>
+              <input id="geminiApiKey" type="password" placeholder="Stored locally in chrome.storage.local">
+            </label>
+            <div class="form-actions">
+              <button class="primary" type="submit">Save Preferences</button>
+            </div>
+          </form>
+        </section>
+      </main>
+
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="utils.js"></script>
+    <script src="options.js"></script>
+  </body>
+  </html>
