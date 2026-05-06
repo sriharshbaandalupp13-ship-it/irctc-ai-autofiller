@@ -751,7 +751,7 @@
       #irctc-autofill-widget {
         position: fixed;
         right: 16px;
-        bottom: 18px;
+        top: 86px;
         z-index: 2147483646;
         font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
       }
@@ -840,7 +840,7 @@
       badge.id = "irctc-autofill-ready-badge";
       badge.style.cssText = [
         "position:fixed",
-        "top:86px",
+        "top:228px",
         "right:18px",
         "z-index:2147483645",
         "padding:10px 12px",
