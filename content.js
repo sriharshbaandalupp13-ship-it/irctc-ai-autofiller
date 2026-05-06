@@ -243,10 +243,26 @@
   }
 
   async function clickAngularDropdown(dropdown, value, purpose) {
-    dropdown.click();
+    const clickTarget = resolveDropdownClickTarget(dropdown);
+    clickTarget.click();
     await humanDelay(150, 260);
     const option = await waitForDropdownOption(value);
     if (!option) {
+      const currentLabel = getDropdownDisplayedText(dropdown);
+      const alreadySelected = matchesDropdownValue(currentLabel, value);
+
+      if (alreadySelected) {
+        return;
+      }
+
+      if (purpose === "Journey class") {
+        await updateStatus("ready", `Could not set ${purpose} to "${value}". Continuing with "${currentLabel || "All Classes"}" so you can choose class manually on the train list.`, [
+          { label: "Route details filled", state: "complete" },
+          { label: `Using ${currentLabel || "All Classes"} for search`, state: "active" }
+        ]);
+        return;
+      }
+
       throw await createUserVisibleError(`Could not select ${purpose}: "${value}".`);
     }
     option.click();
@@ -258,13 +274,54 @@
     const timeoutAt = Date.now() + 6000;
     while (Date.now() < timeoutAt) {
       const candidates = Array.from(document.querySelectorAll(".p-dropdown-item, .ui-dropdown-item, li[role='option'], span"))
-        .filter((node) => normalizeText(node.textContent).includes(target));
+        .filter((node) => matchesDropdownValue(node.textContent, value));
       if (candidates.length) {
         return candidates[0];
       }
       await sleep(180);
     }
     return null;
+  }
+
+  function resolveDropdownClickTarget(dropdown) {
+    return dropdown.matches(".ui-dropdown, .p-dropdown")
+      ? dropdown
+      : dropdown.querySelector(".ui-dropdown, .p-dropdown, .ui-dropdown-label-container, [role='listbox'], input[role='listbox']") || dropdown;
+  }
+
+  function getDropdownDisplayedText(dropdown) {
+    const source = dropdown.matches(".ui-dropdown, .p-dropdown")
+      ? dropdown
+      : dropdown.querySelector(".ui-dropdown, .p-dropdown, .ui-dropdown-label, [role='listbox']") || dropdown;
+    return normalizeText(source.textContent || source.getAttribute("aria-label") || "");
+  }
+
+  function matchesDropdownValue(candidateText, requestedValue) {
+    const candidate = normalizeText(candidateText);
+    const requested = normalizeText(requestedValue);
+
+    if (!candidate || !requested) {
+      return false;
+    }
+
+    if (candidate.includes(requested) || requested.includes(candidate)) {
+      return true;
+    }
+
+    const aliasMap = {
+      "3a": ["ac 3 tier", "ac 3 tier (3a)", "third ac", "3 tier"],
+      "2a": ["ac 2 tier", "ac 2 tier (2a)", "second ac", "2 tier"],
+      "1a": ["ac first class", "ac first class (1a)", "first ac"],
+      "sl": ["sleeper", "sleeper (sl)"],
+      "general": ["general", "gn"],
+      "tatkal": ["tatkal", "tk"],
+      "premium tatkal": ["premium tatkal", "pt"],
+      "ladies": ["ladies", "ld"],
+      "senior citizen": ["senior citizen", "ss"]
+    };
+
+    const aliases = aliasMap[requested] || [];
+    return aliases.some((alias) => candidate.includes(alias));
   }
 
   async function runPassengerAutomation(journeyConfig) {
