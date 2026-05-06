@@ -1,3 +1,9 @@
+try {
+  importScripts("local-config.js");
+} catch (error) {
+  /* Local-only config is optional. */
+}
+
 importScripts("utils.js");
 
 /* global IRCTCUtils, chrome */
@@ -20,12 +26,15 @@ const ALARM_NAMES = {
   AVAILABILITY_POLL: "availability-alert-poll"
 };
 
+initializeLocalSecrets();
+
 const memoryState = {
   pendingPopupPort: null,
   inflightAvailabilityTabs: new Map()
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await initializeLocalSecrets();
   const data = await getDataBundle();
   await setStorage({
     [STORAGE_KEYS.DEFAULT_PREFERENCES]: data.defaultPreferences,
@@ -178,6 +187,22 @@ async function handleMessage(message, sender) {
     default:
       return {};
   }
+}
+
+async function initializeLocalSecrets() {
+  const localGeminiKey = globalThis.IRCTCLocalConfig?.geminiApiKey?.trim();
+  if (!localGeminiKey) {
+    return;
+  }
+
+  const existing = await getStorage([STORAGE_KEYS.GEMINI_API_KEY]);
+  if (existing[STORAGE_KEYS.GEMINI_API_KEY]) {
+    return;
+  }
+
+  await setStorage({
+    [STORAGE_KEYS.GEMINI_API_KEY]: localGeminiKey
+  });
 }
 
 async function getPopupState() {
