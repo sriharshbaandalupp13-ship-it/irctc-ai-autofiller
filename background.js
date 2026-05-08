@@ -715,7 +715,7 @@ async function scheduleTatkalAlarms(tatkalRushConfig) {
   for (const definition of getTatkalAlarmDefinitions(tatkalClassType)) {
     const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, definition.slotType));
     await chrome.alarms.create(definition.prePositionName, { when: schedule.startAt.getTime() - 15 * 60 * 1000 });
-    await chrome.alarms.create(definition.startName, { when: schedule.startAt.getTime() });
+    await chrome.alarms.create(definition.startName, { when: schedule.startAt.getTime() - 3000 });
     await chrome.alarms.create(definition.reminderName, { when: schedule.reminderAt.getTime() });
   }
 }

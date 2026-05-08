@@ -1,4 +1,4 @@
-/* global chrome, IRCTCUtils */
+﻿/* global chrome, IRCTCUtils */
 
 (function () {
   const {
@@ -222,7 +222,7 @@
       if (contentState.activeConfig) {
         await detectSessionExpiry();
       }
-    }, 15000);
+    }, 5000);
   }
 
   function startServerDownWatcher() {
@@ -609,15 +609,28 @@
     await waitForBlockingPopupToClear();
 
     if (contentState.tatkalPrePositioned && journeyConfig.tatkalRushMode && isSearchPage(location.href) && !isAvailabilityMode) {
-      const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
-      showStatusToast("⚡ Tatkal pre-positioned form ready — submitting immediately", "info");
-      await humanDelay(140, 260);
+      const searchButton = await findElement('Search Trains button', SELECTORS.searchButton);
+      const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
+      const scheduledTime = tatkalRushConfig?.scheduledFor ? new Date(tatkalRushConfig.scheduledFor).getTime() : 0;
+
+      if (scheduledTime > Date.now() && scheduledTime - Date.now() < 30000) {
+        const timeStr = new Date(scheduledTime).toLocaleTimeString();
+        await updateStatus('active', '⚡ Waiting for ' + timeStr + ' to click Search...', [
+          { label: 'Tatkal pre-positioned', state: 'complete' },
+          { label: 'Awaiting ' + timeStr, state: 'active' }
+        ]);
+        while (Date.now() < scheduledTime) {
+          await sleep(50);
+        }
+      }
+
+      showStatusToast('⚡ Tatkal starting — submitting now!', 'success');
       searchButton.click();
       contentState.tatkalPrePositioned = false;
       if (journeyConfig?.metadata) {
         journeyConfig.metadata.tatkalPrePositioned = false;
       }
-      await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
+      await saveCheckpoint('STEP_COMPLETED_SEARCH', journeyConfig);
       return { submitted: true };
     }
 
