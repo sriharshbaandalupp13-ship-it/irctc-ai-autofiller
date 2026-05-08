@@ -22,6 +22,7 @@ const {
 const ALARM_NAMES = {
   TATKAL_START: "tatkal-start",
   TATKAL_REMINDER: "tatkal-reminder",
+  TATKAL_PRE_POSITION: "tatkal-pre-position",
   AVAILABILITY_POLL: "availability-alert-poll"
 };
 
@@ -73,6 +74,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
 
+  if (alarm.name === ALARM_NAMES.TATKAL_PRE_POSITION) {
+    const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
+    if (!tatkalRushConfig?.enabled || !tatkalRushConfig?.journeyConfig) {
+      return;
+    }
+
+    const tabId = await openOrNavigateToIrctcTab(IRCTC_URLS.SEARCH);
+    if (!tabId) {
+      return;
+    }
+
+    await safeSendToTab(tabId, {
+      type: "TATKAL_PRE_FILL_SEARCH"
+    });
+    return;
+  }
+
   if (alarm.name === ALARM_NAMES.TATKAL_START) {
     const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
     if (!tatkalRushConfig?.enabled || !tatkalRushConfig?.journeyConfig) {
@@ -86,10 +104,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       message: "Tatkal booking starting now!"
     });
 
-    const created = await chrome.tabs.create({
-      url: IRCTC_URLS.SEARCH,
-      active: true
-    });
+    const tabId = await openOrNavigateToIrctcTab(IRCTC_URLS.SEARCH);
+    if (!tabId) {
+      return;
+    }
 
     const journeyConfig = buildJourneyConfig({
       ...tatkalRushConfig.journeyConfig,
@@ -104,10 +122,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       [STORAGE_KEYS.ACTIVE_BOOKING]: {
         mode: "booking",
         journeyConfig,
-        sourceTabId: created.id,
+        sourceTabId: tabId,
         triggeredBy: "tatkal-alarm",
         lastUpdatedAt: new Date().toISOString()
       }
+    });
+
+    await safeSendToTab(tabId, {
+      type: "START_PAGE_AUTOMATION",
+      journeyConfig
     });
     return;
   }
@@ -172,6 +195,16 @@ async function handleMessage(message, sender) {
       return clearTatkalAlarm();
     case "PAGE_READY":
       return handlePageReady(message.payload, sender);
+    case "SERVER_DOWN_NOTIFY":
+      return showNotification({
+        title: "🔴 IRCTC Down",
+        message: "IRCTC is down. Extension is monitoring and will alert you when it's back."
+      });
+    case "SERVER_BACK_NOTIFY":
+      return showNotification({
+        title: "✅ IRCTC is back",
+        message: "IRCTC is back online — resuming booking now."
+      });
     case "BOOKING_COMPLETED":
       return finalizeBooking(message.payload);
     case "GET_ACTIVE_BOOKING":
@@ -607,6 +640,7 @@ async function setTatkalAlarm(payload) {
 async function clearTatkalAlarm() {
   await chrome.alarms.clear(ALARM_NAMES.TATKAL_START);
   await chrome.alarms.clear(ALARM_NAMES.TATKAL_REMINDER);
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_PRE_POSITION);
   return {};
 }
 
@@ -616,6 +650,7 @@ async function scheduleTatkalAlarms(tatkalRushConfig) {
   const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType));
 
   await clearTatkalAlarm();
+  await chrome.alarms.create(ALARM_NAMES.TATKAL_PRE_POSITION, { when: schedule.startAt.getTime() - 15 * 60 * 1000 });
   await chrome.alarms.create(ALARM_NAMES.TATKAL_START, { when: schedule.startAt.getTime() });
   await chrome.alarms.create(ALARM_NAMES.TATKAL_REMINDER, { when: schedule.reminderAt.getTime() });
 }
@@ -643,6 +678,17 @@ async function safeSendToTab(tabId, message) {
   } catch (error) {
     return null;
   }
+}
+
+async function openOrNavigateToIrctcTab(url) {
+  const tabs = await chrome.tabs.query({ url: "*://www.irctc.co.in/*" });
+  let tab = tabs.find((entry) => entry.url && entry.url.includes("irctc.co.in"));
+  if (tab?.id) {
+    await chrome.tabs.update(tab.id, { url, active: true });
+    return tab.id;
+  }
+  const created = await chrome.tabs.create({ url, active: true });
+  return created.id;
 }
 
 function isSearchPage(url = "") {

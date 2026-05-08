@@ -77,6 +77,21 @@
                   <select id="quota"></select>
                 </label>
               </div>
+              <label>
+                <span>Preferred Train (optional)</span>
+                <input id="preferredTrain" type="text" placeholder="e.g. 11020 or KONARK EXPRESS">
+                <small class="muted">Leave blank to auto-pick the best available train.</small>
+              </label>
+              <div class="class-fallback-block">
+                <span>Class Fallback Priority</span>
+                <ul id="fallbackClassOrderList" class="fallback-order-list">
+                  <li draggable="true" data-value="SL">SL</li>
+                  <li draggable="true" data-value="3A">3A</li>
+                  <li draggable="true" data-value="2A">2A</li>
+                  <li draggable="true" data-value="1A">1A</li>
+                </ul>
+                <p class="muted">Drag to reorder classes when the selected class is full.</p>
+              </div>
               <label class="toggle-row">
                 <span>Auto-select best train</span>
                 <input id="autoSelectTrain" type="checkbox">

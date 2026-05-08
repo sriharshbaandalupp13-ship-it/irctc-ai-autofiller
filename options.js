@@ -75,6 +75,7 @@
       "favoriteGroupId",
       "favoritePassengerId",
       "selectionMode",
+      "seniorConcession",
       "toast"
     ].forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -137,6 +138,7 @@
       age: Number(elements.age.value),
       gender: elements.gender.value,
       berthPreference: elements.berthPreference.value,
+      seniorConcession: Boolean(elements.seniorConcession.checked),
       idProofType: elements.idProofType.value,
       idProofNumber: elements.idProofNumber.value.trim()
     };
@@ -165,6 +167,7 @@
     elements.profileId.value = "";
     elements.gender.value = GENDERS[0];
     elements.berthPreference.value = BERTH_PREFERENCES[0];
+    elements.seniorConcession.checked = false;
     elements.idProofType.value = ID_PROOF_TYPES[0];
   }
 
@@ -269,6 +272,7 @@
         <strong>${escapeHtml(profile.fullName)}</strong>
         <div class="meta">${escapeHtml(`${profile.age} yrs | ${profile.gender} | ${profile.berthPreference}`)}</div>
         <div class="meta">${escapeHtml(`${profile.idProofType}: ${profile.idProofNumber}`)}</div>
+        <div class="meta">${profile.seniorConcession ? "Senior concession enabled" : "Senior concession disabled"}</div>
         <div class="item-actions">
           <button class="chip-button" type="button" data-action="edit">Edit</button>
           <button class="chip-button" type="button" data-action="delete">Delete</button>
@@ -300,6 +304,7 @@
     elements.age.value = String(profile.age);
     elements.gender.value = profile.gender;
     elements.berthPreference.value = profile.berthPreference;
+    elements.seniorConcession.checked = Boolean(profile.seniorConcession);
     elements.idProofType.value = profile.idProofType;
     elements.idProofNumber.value = profile.idProofNumber;
     window.scrollTo({ top: 0, behavior: "smooth" });

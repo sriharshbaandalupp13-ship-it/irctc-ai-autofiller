@@ -107,7 +107,13 @@
     trainListHandledForUrl: "",
     resumeBannerVisible: false,
     autoLoginInFlight: false,
-    autoOkWatcherStarted: false
+    autoOkWatcherStarted: false,
+    captchaPaused: false,
+    captchaPausedAtStep: null,
+    tatkalPrePositioned: false,
+    sessionExpiryPollerStarted: false,
+    serverDownPollerStarted: false,
+    lastUrlChangeAt: Date.now()
   };
 
   init();
@@ -131,6 +137,10 @@
     await maybeShowResumeBanner();
     await notifyPageReady();
     observeUrlChanges();
+    startSessionExpiryWatcher();
+    startServerDownWatcher();
+    startCaptchaMonitor();
+    setTimeout(() => detectServerDown(), 15000);
     if (isTrainListPage(location.href)) {
       await handleTrainListAutomation();
     }
@@ -148,7 +158,14 @@
     let lastHref = location.href;
     const observer = new MutationObserver(async () => {
       if (location.href !== lastHref) {
+        const now = Date.now();
+        const timeSinceLast = now - contentState.lastUrlChangeAt;
+        contentState.lastUrlChangeAt = now;
         lastHref = location.href;
+        await detectSessionExpiry();
+        if (contentState.activeConfig && timeSinceLast > 20000) {
+          await detectServerDown();
+        }
         mountAssistantWidget();
         await loadWidgetState();
         const loginOutcome = await maybeHandleAutoLogin();
@@ -182,6 +199,39 @@
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
     maybeClickBlockingOkButton().catch(() => undefined);
+  }
+
+  function startSessionExpiryWatcher() {
+    if (contentState.sessionExpiryPollerStarted) {
+      return;
+    }
+    contentState.sessionExpiryPollerStarted = true;
+    setInterval(async () => {
+      if (contentState.activeConfig) {
+        await detectSessionExpiry();
+      }
+    }, 15000);
+  }
+
+  function startServerDownWatcher() {
+    if (contentState.serverDownPollerStarted) {
+      return;
+    }
+    contentState.serverDownPollerStarted = true;
+    setInterval(async () => {
+      if (contentState.activeConfig && Date.now() - contentState.lastUrlChangeAt > 20000) {
+        await detectServerDown();
+      }
+    }, 10000);
+  }
+
+  function startCaptchaMonitor() {
+    const observer = new MutationObserver(async () => {
+      if (contentState.activeConfig && !contentState.captchaPaused && isCaptchaPresent()) {
+        await detectAndHandleCaptcha("STEP_UNKNOWN");
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
   }
 
   async function maybeClickBlockingOkButton() {
@@ -259,19 +309,230 @@
       });
   }
 
+  async function detectSessionExpiry() {
+    if (!contentState.activeConfig || contentState.autoLoginInFlight) {
+      return false;
+    }
+
+    const urlExpired = /\/nget\/logout|\/nget\/user\/login/i.test(location.href);
+    const bodyText = normalizeText(document.body?.textContent || "");
+    const textExpired = /session.*expired|logged.*out|please.*login.*again|your session/i.test(bodyText);
+    const loginNavVisible = Array.from(document.querySelectorAll(SELECTORS.loginNav.join(",")))
+      .some((element) => element && isVisible(element) && normalizeText(element.textContent || "").includes("login"));
+
+    if (!urlExpired && !textExpired && !loginNavVisible) {
+      return false;
+    }
+
+    showStatusToast("⚠️ Session expired — re-logging in automatically...", "info");
+    const { [STORAGE_KEYS.LOGIN_CREDS]: loginCreds } = await getStorage([STORAGE_KEYS.LOGIN_CREDS]);
+    const username = decodeCredential(loginCreds?.ircLogin);
+    const password = decodeCredential(loginCreds?.ircPass);
+    if (!username || !password) {
+      contentState.activeConfig = null;
+      showStatusToast("❌ Re-login failed — please login manually", "error", 0);
+      return false;
+    }
+
+    const loggedIn = await autoLogin(username, password);
+    if (!loggedIn) {
+      contentState.activeConfig = null;
+      showStatusToast("❌ Re-login failed — please login manually", "error", 0);
+      return false;
+    }
+
+    showStatusToast("✅ Re-logged in — resuming from last checkpoint", "success");
+    await resumeBookingFlow();
+    return true;
+  }
+
+  async function detectServerDown() {
+    const titleText = normalizeText(document.title || "");
+    const bodyText = normalizeText(document.body?.textContent || "");
+    const downTitle = /503|502|service unavailable|maintenance/i.test(titleText);
+    const downBody = /service.*unavailable|under.*maintenance|server.*down|temporarily.*unavailable|try.*after.*sometime/i.test(bodyText);
+    const appRootMissing = !document.querySelector("app-root, #app");
+
+    if (!downTitle && !downBody && !appRootMissing) {
+      return false;
+    }
+
+    mountServerDownBanner();
+    await safeSendRuntimeMessage({ type: "SERVER_DOWN_NOTIFY" });
+    return true;
+  }
+
+  let serverDownIntervalId = null;
+
+  function mountServerDownBanner() {
+    if (document.getElementById("irctc-server-down-banner")) {
+      return;
+    }
+    const banner = document.createElement("div");
+    banner.id = "irctc-server-down-banner";
+    banner.style.cssText = [
+      "position:fixed",
+      "top:0",
+      "left:0",
+      "right:0",
+      "z-index:9999999",
+      "background:#4A148C",
+      "color:#fff",
+      "font:14px/1.45 'Segoe UI',sans-serif",
+      "padding:12px 16px",
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:12px",
+      "box-shadow:0 10px 28px rgba(20,35,90,0.24)"
+    ].join(";");
+
+    banner.innerHTML = `
+      <div>
+        🔴 IRCTC appears to be down — checking every 30 seconds...
+        <span id="irctc-server-down-countdown">Next check in: 30s</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;align-items:center;">
+        <button id="irctc-server-down-check-now" type="button" style="border:0;border-radius:10px;padding:9px 12px;background:#FF6D00;color:#fff;font-weight:700;cursor:pointer;">Check Now</button>
+      </div>
+    `;
+    document.body.appendChild(banner);
+    const refresh = () => runServerDownCheckCycle();
+    banner.querySelector("#irctc-server-down-check-now")?.addEventListener("click", refresh);
+    runServerDownCheckCycle();
+  }
+
+  function unmountServerDownBanner() {
+    const banner = document.getElementById("irctc-server-down-banner");
+    if (banner) {
+      banner.remove();
+    }
+    if (serverDownIntervalId !== null) {
+      clearInterval(serverDownIntervalId);
+      serverDownIntervalId = null;
+    }
+  }
+
+  function runServerDownCheckCycle() {
+    let countdown = 30;
+    const countdownLabel = document.getElementById("irctc-server-down-countdown");
+    if (serverDownIntervalId !== null) {
+      clearInterval(serverDownIntervalId);
+    }
+    if (countdownLabel) {
+      countdownLabel.textContent = `Next check in: ${countdown}s`;
+    }
+    serverDownIntervalId = setInterval(async () => {
+      countdown -= 1;
+      if (countdownLabel) {
+        countdownLabel.textContent = `Next check in: ${countdown}s`;
+      }
+      if (countdown <= 0) {
+        clearInterval(serverDownIntervalId);
+        serverDownIntervalId = null;
+        await refreshServerPageForHealth();
+      }
+    }, 1000);
+  }
+
+  async function refreshServerPageForHealth() {
+    const currentUrl = location.href;
+    location.reload();
+    const timeoutAt = Date.now() + 15000;
+    while (Date.now() < timeoutAt) {
+      if (document.querySelector("app-root, #app")) {
+        unmountServerDownBanner();
+        showStatusToast("✅ IRCTC is back online!", "success");
+        await safeSendRuntimeMessage({ type: "SERVER_BACK_NOTIFY" });
+        await resumeBookingFlow();
+        return;
+      }
+      await sleep(800);
+    }
+    mountServerDownBanner();
+  }
+
+  async function detectAndHandleCaptcha(pausedStep) {
+    if (contentState.captchaPaused || !isCaptchaPresent()) {
+      return false;
+    }
+    contentState.captchaPaused = true;
+    contentState.captchaPausedAtStep = pausedStep || null;
+    mountCaptchaBanner();
+    return true;
+  }
+
+  function isCaptchaPresent() {
+    const bodyText = normalizeText(document.body?.textContent || "");
+    const hasText = /captcha|verify you are human|security check/i.test(bodyText);
+    const hasIframe = Array.from(document.querySelectorAll("iframe[src]"))
+      .some((frame) => /captcha|recaptcha|hcaptcha/i.test(frame.src || ""));
+    const hasImage = Array.from(document.querySelectorAll("img[src]"))
+      .some((img) => /captcha/i.test(img.src || ""));
+    const hasVisibleCaptchaBlock = Array.from(document.querySelectorAll("div[id*='captcha'], div[class*='captcha']"))
+      .some((element) => isVisible(element));
+    return hasText || hasIframe || hasImage || hasVisibleCaptchaBlock;
+  }
+
+  function mountCaptchaBanner() {
+    if (document.getElementById("irctc-captcha-banner")) {
+      return;
+    }
+    const banner = document.createElement("div");
+    banner.id = "irctc-captcha-banner";
+    banner.style.cssText = [
+      "position:fixed",
+      `top:${contentState.resumeBannerVisible ? 56 : 0}px`,
+      "left:0",
+      "right:0",
+      "z-index:9999999",
+      "background:#B71C1C",
+      "color:#fff",
+      "font:14px/1.45 'Segoe UI',sans-serif",
+      "padding:12px 16px",
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:12px",
+      "box-shadow:0 10px 28px rgba(0,0,0,0.24)"
+    ].join(";");
+    banner.innerHTML = `
+      <div>🔐 CAPTCHA detected — please solve it, then click Continue</div>
+      <button id="irctc-captcha-continue" type="button" style="border:0;border-radius:10px;padding:9px 12px;background:#FF6D00;color:#fff;font-weight:700;cursor:pointer;">▶ Continue After CAPTCHA</button>
+    `;
+    document.body.appendChild(banner);
+    banner.querySelector("#irctc-captcha-continue")?.addEventListener("click", async () => {
+      unmountCaptchaBanner();
+      contentState.captchaPaused = false;
+      await resumeBookingFlow();
+    });
+  }
+
+  function unmountCaptchaBanner() {
+    const banner = document.getElementById("irctc-captcha-banner");
+    if (banner) {
+      banner.remove();
+    }
+  }
+
   async function handleMessage(message) {
     switch (message?.type) {
       case "BACKGROUND_PAGE_READY":
-        return {};
+        return await handleBackgroundPageReady(message.url);
+      case "TATKAL_PRE_FILL_SEARCH":
+        return await handleTatkalPreFillSearch();
       case "START_PAGE_AUTOMATION":
       case "RUN_AVAILABILITY_PAGE1":
+        mountProgressOverlay();
         return runSearchAutomation(message.journeyConfig, message.type === "RUN_AVAILABILITY_PAGE1");
       case "RUN_PAX_AUTOMATION":
+        mountProgressOverlay();
         return runPassengerAutomation(message.journeyConfig);
       case "SHOW_READY_BADGE":
         await handleTrainListAutomation(message.journeyConfig);
         return {};
       case "RESUME_BOOKING_FLOW":
+        mountProgressOverlay();
         return resumeBookingFlow(message.checkpoint || null);
       case "SCRAPE_AVAILABILITY_RESULTS":
         return scrapeAvailabilityAndSend(message.journeyConfig);
@@ -283,6 +544,28 @@
     }
   }
 
+  async function handleBackgroundPageReady(url) {
+    if (!url || !contentState.activeConfig) {
+      return {};
+    }
+    if (contentState.tatkalPrePositioned && isSearchPage(url) && contentState.activeConfig.tatkalRushMode) {
+      await showStatusToast("⚡ Tatkal pre-positioned — ready to submit at start time", "success");
+    }
+    return {};
+  }
+
+  async function handleTatkalPreFillSearch() {
+    const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
+    if (!tatkalRushConfig?.journeyConfig) {
+      throw await createUserVisibleError("Tatkal pre-fill config is missing.");
+    }
+    contentState.activeConfig = tatkalRushConfig.journeyConfig;
+    await fillSearchForm(tatkalRushConfig.journeyConfig);
+    contentState.tatkalPrePositioned = true;
+    showStatusToast(`⚡ Tatkal pre-positioned — form ready. Will search at ${new Date(tatkalRushConfig.scheduledFor).toLocaleTimeString()}`);
+    return { prepositioned: true };
+  }
+
   async function notifyPageReady() {
     await safeSendRuntimeMessage({
       type: "PAGE_READY",
@@ -292,9 +575,23 @@
     });
   }
 
-  async function runSearchAutomation(journeyConfig, isAvailabilityMode) {
+  async function runSearchAutomationImpl(journeyConfig, isAvailabilityMode) {
     contentState.activeConfig = journeyConfig;
+    if (await detectAndHandleCaptcha("STEP_COMPLETED_SEARCH")) {
+      return { pausedByCaptcha: true };
+    }
     await waitForBlockingPopupToClear();
+
+    if (contentState.tatkalPrePositioned && journeyConfig.tatkalRushMode && isSearchPage(location.href) && !isAvailabilityMode) {
+      const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
+      showStatusToast("⚡ Tatkal pre-positioned form ready — submitting immediately", "info");
+      await humanDelay(140, 260);
+      searchButton.click();
+      contentState.tatkalPrePositioned = false;
+      await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
+      return { submitted: true };
+    }
+
     await updateStatus("active", isAvailabilityMode ? "Checking availability on IRCTC..." : "Filling journey search form...", [
       { label: "Waiting for search form", state: "active" }
     ]);
@@ -330,6 +627,36 @@
     await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
     return { submitted: true };
   }
+
+  async function fillSearchForm(journeyConfig) {
+    const fromInput = await findElement("From station field", SELECTORS.fromStation);
+    const toInput = await findElement("To station field", SELECTORS.toStation);
+    const dateInput = await findElement("Journey date field", SELECTORS.journeyDate);
+    const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
+
+    await clearAndType(fromInput, journeyConfig.fromStation);
+    await humanDelay();
+    await selectAutocompleteOption(journeyConfig.fromStation);
+
+    await clearAndType(toInput, journeyConfig.toStation);
+    await humanDelay();
+    await selectAutocompleteOption(journeyConfig.toStation);
+
+    await setDateInput(dateInput, journeyConfig.journeyDate);
+
+    if (journeyConfig.journeyClass && journeyConfig.journeyClass !== "All Classes") {
+      await trySelectDropdown("Journey class", journeyConfig.journeyClass);
+    }
+
+    await trySelectDropdown("Quota", journeyConfig.quota);
+    return searchButton;
+  }
+
+  const runSearchAutomation = (journeyConfig, isAvailabilityMode) => {
+    mountProgressOverlay("Filling journey search form...");
+    return withRetry(() => runSearchAutomationImpl(journeyConfig, isAvailabilityMode), "Search form fill", 3)
+      .finally(() => unmountProgressOverlay());
+  };
 
   async function selectAutocompleteOption(targetValue) {
     const option = await waitForMatchingOption(targetValue);
@@ -501,7 +828,7 @@
     return aliases.some((alias) => candidate === alias || candidate.startsWith(alias + " ") || candidate.endsWith(" " + alias) || candidate === alias);
   }
 
-  async function runPassengerAutomation(journeyConfig) {
+  async function runPassengerAutomationImpl(journeyConfig) {
     contentState.activeConfig = journeyConfig;
     await waitForBlockingPopupToClear();
     await updateStatus("active", "Passenger details page detected. Filling passengers...", [
@@ -540,6 +867,9 @@
     }
 
     const continueButton = await findContinueButton();
+    if (await detectAndHandleCaptcha("STEP_COMPLETED_PAX")) {
+      return { pausedByCaptcha: true };
+    }
     continueButton.click();
     await saveCheckpoint("STEP_COMPLETED_PAX", journeyConfig);
     await updateStatus("active", "Continuing to payment handoff...", [
@@ -549,6 +879,12 @@
     ]);
     return { continued: true };
   }
+
+  const runPassengerAutomation = (journeyConfig) => {
+    mountProgressOverlay("Completing passenger details...");
+    return withRetry(() => runPassengerAutomationImpl(journeyConfig), "Passenger details fill", 3)
+      .finally(() => unmountProgressOverlay());
+  };
 
   async function ensurePassengerRow(index) {
     const currentRows = await getPassengerRows();
@@ -601,6 +937,26 @@
     await clearAndType(ageInput, String(passenger.age));
     await humanDelay();
     await clickAngularDropdown(genderDropdown, passenger.gender, `Gender for passenger ${index + 1}`);
+
+    const idProofDropdown = await findWithinRow(row, [
+      "p-dropdown[formcontrolname*='idProof']",
+      "select[name*='idProof']",
+      "select[id*='idProof']",
+      "select[name*='id']"
+    ], { skipIfMissing: true });
+
+    if (idProofDropdown && passenger.idProof) {
+      await clickAngularDropdown(idProofDropdown, passenger.idProof, `ID proof for passenger ${index + 1}`);
+    }
+
+    const seniorCheckbox = await findCheckboxByLabelInRow(row, /senior citizen|senior concession|60\+|60 years|senior/i, true);
+    if (seniorCheckbox) {
+      const shouldCheck = Boolean(passenger.seniorConcession || passenger.age >= 60);
+      if (seniorCheckbox.checked !== shouldCheck) {
+        seniorCheckbox.click();
+        await humanDelay();
+      }
+    }
 
     if (nationalityDropdown) {
       await clickAngularDropdown(nationalityDropdown, NATIONALITY_DEFAULT, `Nationality for passenger ${index + 1}`);
@@ -1194,18 +1550,36 @@
     }
   }
 
-  async function autoSelectBestTrain(journeyConfig = {}) {
+  async function autoSelectBestTrainImpl(journeyConfig = {}) {
     try {
       await showReadyBadge("Auto-selecting the best train...");
       showStatusToast("Waiting for train list to load...", "info");
       await waitForTrainCards();
       await humanDelay();
 
+      if (await detectAndHandleCaptcha("STEP_WAITING_TRAIN_SELECT")) {
+        return { pausedByCaptcha: true };
+      }
+
+      showStatusToast("🔄 Refreshing seat availability...", "info");
+      await autoRefreshSeats();
+      showStatusToast("✅ Availability loaded", "success");
+
       showStatusToast("Scanning visible trains...", "info");
       const trains = parseTrainCards();
-      const best = scoreTrainRecommendation(trains, journeyConfig.journeyClass || "3A");
+      const preferredTrainText = String(journeyConfig.preferredTrain || "").trim();
+      const preferredSelection = preferredTrainText ? findPreferredTrain(trains, preferredTrainText) : null;
+      if (preferredTrainText && preferredSelection) {
+        showStatusToast(`✅ Found preferred train: ${preferredSelection.train.trainName} (${preferredSelection.train.trainNumber})`, "success");
+      }
+
+      const best = preferredSelection || scoreTrainRecommendation(trains, journeyConfig.journeyClass || "3A");
       if (!best?.train?.trainNumber) {
         throw await createUserVisibleError("Could not identify the best train from the visible list.");
+      }
+
+      if (preferredTrainText && !preferredSelection) {
+        showStatusToast(`⚠️ Preferred train ${preferredTrainText} not found on this date — falling back to best available train`, "info");
       }
 
       await maybeGenerateTrainRecommendation(journeyConfig);
@@ -1215,52 +1589,59 @@
         throw await createUserVisibleError(`Could not find the recommended train card for ${best.train.trainNumber}.`);
       }
 
-      await updateStatus("active", `Best train found: ${best.train.trainName} (${best.train.trainNumber}). Opening ${journeyConfig.journeyClass || "selected"} class...`, [
+      const fallbackOrder = getFallbackClassOrder(journeyConfig);
+      const selection = await selectTrainClassWithFallback(card, best.train, fallbackOrder, trains);
+      if (!selection?.classButton) {
+        throw await createUserVisibleError(`All preferred classes full for train ${best.train.trainNumber}.`, card);
+      }
+
+      await updateStatus("active", `Best train found: ${selection.train.trainName} (${selection.train.trainNumber}). Opening ${selection.selectedClass} class...`, [
         { label: "Train list loaded", state: "complete" },
-        { label: `Recommended ${best.train.trainNumber}`, state: "complete" },
-        { label: `Opening ${journeyConfig.journeyClass || "class"} availability`, state: "active" }
+        { label: `Selected ${selection.train.trainNumber}`, state: "complete" },
+        { label: `Opening ${selection.selectedClass} availability`, state: "active" }
       ]);
-      showStatusToast(`Best train found: ${best.train.trainName} (${best.train.trainNumber})`, "success");
+      showStatusToast(`Best train found: ${selection.train.trainName} (${selection.train.trainNumber})`, "success");
 
       card.scrollIntoView({ behavior: "smooth", block: "center" });
       await humanDelay(180, 320);
 
-      const classButton = await findClassButtonInCard(card, journeyConfig.journeyClass || "3A");
-      if (!classButton) {
-        throw await createUserVisibleError(`Could not find the ${journeyConfig.journeyClass || "selected"} class button for train ${best.train.trainNumber}.`, card);
-      }
-
-      classButton.click();
+      selection.classButton.click();
       await humanDelay(220, 360);
-      showStatusToast(`Opened ${journeyConfig.journeyClass || "selected"} class for ${best.train.trainNumber}`, "info");
+      showStatusToast(`Opened ${selection.selectedClass} class for ${selection.train.trainNumber}`, "info");
 
-      await updateStatus("active", `Looking for Book Now on ${best.train.trainNumber}...`, [
+      await updateStatus("active", `Looking for Book Now on ${selection.train.trainNumber}...`, [
         { label: "Train list loaded", state: "complete" },
-        { label: `Opened ${journeyConfig.journeyClass || "class"} for ${best.train.trainNumber}`, state: "complete" },
+        { label: `Opened ${selection.selectedClass} for ${selection.train.trainNumber}`, state: "complete" },
         { label: "Waiting for Book Now button", state: "active" }
       ]);
 
-      const bookNowButton = await findBookNowButtonInCard(card, best.train);
+      const bookNowButton = await findBookNowButtonInCard(card, selection.train);
       if (!bookNowButton) {
-        throw await createUserVisibleError(`Could not find Book Now for train ${best.train.trainNumber}.`, card);
+        throw await createUserVisibleError(`Could not find Book Now for train ${selection.train.trainNumber}.`, card);
+      }
+      if (await detectAndHandleCaptcha("STEP_COMPLETED_TRAIN_SELECT")) {
+        return { pausedByCaptcha: true };
       }
 
-      showStatusToast(`Book Now found for ${best.train.trainNumber}. Booking...`, "success");
+      showStatusToast(`Book Now found for ${selection.train.trainNumber}. Booking...`, "success");
       bookNowButton.click();
       await saveCheckpoint("STEP_COMPLETED_TRAIN_SELECT", journeyConfig);
       await humanDelay(200, 340);
 
-      await updateStatus("active", `Book Now clicked for ${best.train.trainName}. Moving to passenger details...`, [
+      await updateStatus("active", `Book Now clicked for ${selection.train.trainName}. Moving to passenger details...`, [
         { label: "Train list loaded", state: "complete" },
-        { label: `Selected ${best.train.trainNumber}`, state: "complete" },
+        { label: `Selected ${selection.train.trainNumber}`, state: "complete" },
         { label: "Book Now clicked", state: "complete" }
       ]);
-      await showReadyBadge(`Best train selected automatically: ${best.train.trainNumber}`);
+      await showReadyBadge(`Best train selected automatically: ${selection.train.trainNumber}`);
     } catch (error) {
       contentState.trainListHandledForUrl = "";
       throw error;
     }
   }
+
+  const autoSelectBestTrain = (journeyConfig) =>
+    withRetry(() => autoSelectBestTrainImpl(journeyConfig), "Train auto-selection", 3);
 
   function findTrainCardByNumber(trainNumber) {
     if (!trainNumber) {
@@ -1299,6 +1680,66 @@
       "1a": ["1a", "ac first class", "first ac"]
     };
     return aliasMap[journeyClass] || [journeyClass];
+  }
+
+  function getFallbackClassOrder(journeyConfig) {
+    return Array.isArray(journeyConfig.fallbackClassOrder) && journeyConfig.fallbackClassOrder.length
+      ? journeyConfig.fallbackClassOrder
+      : ["3A", "2A", "SL", "1A"];
+  }
+
+  function findPreferredTrain(trains, preferredTrainText) {
+    const normalizedTarget = normalizeText(preferredTrainText);
+    return trains.find((train) => {
+      return normalizeText(train.trainNumber).includes(normalizedTarget) || normalizeText(train.trainName).includes(normalizedTarget);
+    }) || null;
+  }
+
+  async function selectTrainClassWithFallback(card, train, fallbackOrder, trains) {
+    const orderedTrains = [train, ...trains.filter((candidate) => candidate.trainNumber !== train.trainNumber)];
+    for (const candidate of orderedTrains) {
+      const candidateCard = findTrainCardByNumber(candidate.trainNumber) || findTrainCardByName(candidate.trainName);
+      if (!candidateCard) {
+        continue;
+      }
+      for (const className of fallbackOrder) {
+        if (isClassUnavailable(candidate, className)) {
+          showStatusToast(`⚠️ ${className} full — trying next class...`, "info");
+          continue;
+        }
+        const classButton = await findClassButtonInCard(candidateCard, className);
+        if (!classButton) {
+          continue;
+        }
+        return {
+          card: candidateCard,
+          train: candidate,
+          classButton,
+          selectedClass: className
+        };
+      }
+    }
+    return null;
+  }
+
+  function isClassUnavailable(train, className) {
+    const availabilityText = String(train.availability?.[className] || "").toLowerCase();
+    if (!availabilityText) {
+      return true;
+    }
+    if (/regret|not available|wait listed|wl|rAC/i.test(availabilityText)) {
+      const match = availabilityText.match(/wl\s*(\d+)/i);
+      if (!match) {
+        return true;
+      }
+      return Number(match[1]) > 50;
+    }
+    return false;
+  }
+
+  function findTrainCardByName(trainName) {
+    const cards = Array.from(document.querySelectorAll("app-train-list, .train-avl-enq-box, .train-list .train-row, .tbis-div"));
+    return cards.find((card) => normalizeText(card.textContent || "").includes(normalizeText(trainName))) || null;
   }
 
   async function findBookNowButtonInCard(card, train) {
@@ -1349,6 +1790,24 @@
       await sleep(250);
     }
     throw new Error("Train list did not render in time");
+  }
+
+  async function autoRefreshSeats() {
+    const candidate = Array.from(document.querySelectorAll("button, input[type='button'], a"))
+      .filter((element) => isVisible(element))
+      .find((element) => {
+        const label = normalizeText(element.textContent || element.value || element.getAttribute("aria-label") || "");
+        return /refresh|re[- ]?check|update|reload/i.test(label);
+      });
+
+    if (candidate) {
+      candidate.click();
+      await humanDelay(520, 780);
+      await waitForTrainCards();
+      return;
+    }
+
+    await sleep(900);
   }
 
   async function findElement(purpose, selectors) {
@@ -1447,6 +1906,19 @@
     throw await createUserVisibleError(`Checkbox matching ${pattern} was not found.`);
   }
 
+  async function findCheckboxByLabelInRow(row, pattern, skipIfMissing = false) {
+    const wrappers = Array.from(row.querySelectorAll("label, div, section"));
+    const wrapper = wrappers.find((node) => pattern.test(normalizeText(node.textContent)));
+    const checkbox = wrapper?.querySelector("input[type='checkbox']");
+    if (checkbox) {
+      return checkbox;
+    }
+    if (skipIfMissing) {
+      return null;
+    }
+    throw await createUserVisibleError(`Checkbox matching ${pattern} in passenger row was not found.`);
+  }
+
   async function findButtonByText(pattern) {
     const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
     return buttons.find((button) => pattern.test(normalizeText(button.textContent))) || null;
@@ -1543,6 +2015,79 @@
         toast.style.opacity = "0";
       }
     }, 2600);
+  }
+
+  async function withRetry(action, purpose, attempts = 3) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await action();
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) {
+          showStatusToast(`Retrying ${purpose} (${attempt + 1}/${attempts})...`, "info");
+          await sleep(400 + Math.random() * 300);
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  function mountProgressOverlay(message = "IRCTC AutoFill is working...") {
+    if (document.getElementById("irctc-autofill-progress-overlay")) {
+      updateProgressOverlay(message);
+      return;
+    }
+
+    const overlay = document.createElement("div");
+    overlay.id = "irctc-autofill-progress-overlay";
+    overlay.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "background:rgba(10,18,55,0.72)",
+      "z-index:2147483646",
+      "display:flex",
+      "align-items:center",
+      "justify-content:center",
+      "padding:20px"
+    ].join(";");
+
+    const panel = document.createElement("div");
+    panel.style.cssText = [
+      "max-width:420px",
+      "width:100%",
+      "background:#fff",
+      "border-radius:20px",
+      "padding:22px",
+      "text-align:center",
+      "box-shadow:0 24px 75px rgba(0,0,0,0.22)",
+      "font:14px/1.5 'Segoe UI',sans-serif"
+    ].join(";");
+
+    const text = document.createElement("div");
+    text.id = "irctc-autofill-progress-text";
+    text.textContent = message;
+    text.style.marginBottom = "10px";
+    text.style.fontWeight = "700";
+    text.style.color = "#1a237e";
+
+    panel.appendChild(text);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+  }
+
+  function updateProgressOverlay(message) {
+    const text = document.getElementById("irctc-autofill-progress-text");
+    if (text) {
+      text.textContent = message;
+    }
+  }
+
+  function unmountProgressOverlay() {
+    const overlay = document.getElementById("irctc-autofill-progress-overlay");
+    if (overlay) {
+      overlay.remove();
+    }
   }
 
   function mountAssistantWidget() {

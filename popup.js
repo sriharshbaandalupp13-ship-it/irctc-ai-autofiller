@@ -25,6 +25,7 @@
     runtimeStatus: null,
     recommendation: null,
     selectedPassengerIds: new Set(),
+    fallbackClassOrder: ["3A", "2A", "SL", "1A"],
     availabilityResults: null,
     tatkalRushConfig: null,
     bookingCheckpoint: null
@@ -53,6 +54,8 @@
       "passengerCount",
       "journeyClass",
       "quota",
+      "preferredTrain",
+      "fallbackClassOrderList",
       "autoSelectTrain",
       "travelInsurance",
       "autoUpgrade",
@@ -142,6 +145,86 @@
     });
     elements.armTatkalButton.addEventListener("click", armTatkalRush);
     elements.disarmTatkalButton.addEventListener("click", disarmTatkalRush);
+
+    if (elements.fallbackClassOrderList) {
+      elements.fallbackClassOrderList.addEventListener("dragstart", onFallbackDragStart);
+      elements.fallbackClassOrderList.addEventListener("dragover", onFallbackDragOver);
+      elements.fallbackClassOrderList.addEventListener("drop", onFallbackDrop);
+      elements.fallbackClassOrderList.addEventListener("dragend", onFallbackDragEnd);
+    }
+  }
+
+  function onFallbackDragStart(event) {
+    event.dataTransfer?.setData("text/plain", (event.target && event.target.dataset?.value) || "");
+    event.dataTransfer.effectAllowed = "move";
+    if (event.target) {
+      event.target.classList.add("dragging");
+    }
+  }
+
+  function onFallbackDragOver(event) {
+    event.preventDefault();
+    const list = elements.fallbackClassOrderList;
+    const afterElement = getDragAfterElement(list, event.clientY);
+    const dragging = list.querySelector(".dragging");
+    if (!dragging) {
+      return;
+    }
+    if (afterElement == null) {
+      list.appendChild(dragging);
+    } else {
+      list.insertBefore(dragging, afterElement);
+    }
+  }
+
+  function onFallbackDrop(event) {
+    event.preventDefault();
+    state.fallbackClassOrder = readFallbackClassOrder();
+  }
+
+  function onFallbackDragEnd(event) {
+    if (event.target) {
+      event.target.classList.remove("dragging");
+    }
+    state.fallbackClassOrder = readFallbackClassOrder();
+  }
+
+  function getDragAfterElement(container, y) {
+    const draggableElements = [...container.querySelectorAll("li:not(.dragging)")];
+    return draggableElements.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) {
+        return { offset, element: child };
+      }
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+  }
+
+  function renderFallbackClassOrder() {
+    if (!elements.fallbackClassOrderList) {
+      return;
+    }
+    elements.fallbackClassOrderList.innerHTML = "";
+    const order = Array.isArray(state.fallbackClassOrder) && state.fallbackClassOrder.length
+      ? state.fallbackClassOrder
+      : ["3A", "2A", "SL", "1A"];
+    order.forEach((value) => {
+      const li = document.createElement("li");
+      li.dataset.value = value;
+      li.draggable = true;
+      li.textContent = value;
+      elements.fallbackClassOrderList.appendChild(li);
+    });
+  }
+
+  function readFallbackClassOrder() {
+    if (!elements.fallbackClassOrderList) {
+      return ["3A", "2A", "SL", "1A"];
+    }
+    return Array.from(elements.fallbackClassOrderList.querySelectorAll("li"))
+      .map((li) => li.dataset.value)
+      .filter(Boolean);
   }
 
   function connectPort() {
@@ -200,6 +283,9 @@
     if (!draft) {
       elements.tatkalRushMode.checked = false;
       elements.autoSelectTrain.checked = false;
+      elements.preferredTrain.value = "";
+      state.fallbackClassOrder = ["3A", "2A", "SL", "1A"];
+      renderFallbackClassOrder();
       applyTatkalClassType("ac");
       applyPreferences(DEFAULT_PREFERENCES);
       syncAutoSelectConstraint();
@@ -212,6 +298,11 @@
     elements.passengerCount.value = String(draft.passengerCount || 1);
     elements.journeyClass.value = draft.journeyClass || "3A";
     elements.quota.value = draft.quota || "General";
+    elements.preferredTrain.value = draft.preferredTrain || "";
+    state.fallbackClassOrder = Array.isArray(draft.fallbackClassOrder) && draft.fallbackClassOrder.length
+      ? draft.fallbackClassOrder
+      : ["3A", "2A", "SL", "1A"];
+    renderFallbackClassOrder();
     elements.tatkalRushMode.checked = Boolean(draft.tatkalRushMode);
     elements.autoSelectTrain.checked = Boolean(draft.autoSelectTrain || draft.metadata?.autoSelectTrain);
     state.selectedPassengerIds = new Set(draft.selectedPassengerIds || []);
@@ -248,6 +339,8 @@
         preferredCoach: elements.preferredCoach.value.trim(),
         reservationChoice: elements.reservationChoice.value.trim()
       },
+      preferredTrain: elements.preferredTrain.value.trim(),
+      fallbackClassOrder: readFallbackClassOrder(),
       tatkalRushMode,
       autoSelectTrain,
       tatkalClassType: getSelectedTatkalClassType(),

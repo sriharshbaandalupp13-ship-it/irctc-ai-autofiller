@@ -235,6 +235,10 @@ const STORAGE_KEYS = {
 
     const passengers = Array.isArray(raw.selectedPassengers) ? raw.selectedPassengers : [];
 
+    const fallbackClassOrder = Array.isArray(raw.fallbackClassOrder) && raw.fallbackClassOrder.length
+      ? raw.fallbackClassOrder
+      : ["3A", "2A", "SL", "1A"];
+
     return {
       id: raw.id || generateId("journey"),
       fromStation: raw.fromStation || "",
@@ -245,6 +249,8 @@ const STORAGE_KEYS = {
       passengerCount: Math.max(1, Math.min(6, Number(raw.passengerCount) || passengers.length || 1)),
       selectedPassengerIds: Array.isArray(raw.selectedPassengerIds) ? raw.selectedPassengerIds : passengers.map((passenger) => passenger.id),
       selectedPassengers: passengers.slice(0, 6),
+      preferredTrain: String(raw.preferredTrain || "").trim(),
+      fallbackClassOrder,
       preferences,
       tatkalRushMode: Boolean(raw.tatkalRushMode),
       autoSelectTrain: Boolean(raw.autoSelectTrain || raw.metadata?.autoSelectTrain),
