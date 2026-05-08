@@ -7,17 +7,7 @@ try {
 importScripts("utils.js");
 
 /* global IRCTCUtils, STORAGE_KEYS, IRCTC_URLS, chrome */
-
-/* Functions extracted from IRCTCUtils — constants STORAGE_KEYS/IRCTC_URLS are already global from utils.js */
-const {
-  getStorage,
-  setStorage,
-  getDataBundle,
-  buildJourneyConfig,
-  computeTatkalTime,
-  createStatusStep,
-  formatTimestamp
-} = IRCTCUtils;
+// Global functions are already provided by utils.js via importScripts
 
 const ALARM_NAMES = {
   TATKAL_START: "tatkal-start",
