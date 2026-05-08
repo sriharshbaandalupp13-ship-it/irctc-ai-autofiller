@@ -1,10 +1,6 @@
-try {
-  importScripts("local-config.js");
-} catch (error) {
-  /* Local-only config is optional. */
-}
-
+importScripts("local-config.js");
 importScripts("utils.js");
+
 
 /* global IRCTCUtils, STORAGE_KEYS, IRCTC_URLS, chrome */
 
