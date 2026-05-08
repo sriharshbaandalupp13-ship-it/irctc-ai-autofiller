@@ -1,4 +1,4 @@
-﻿/* global chrome, IRCTCUtils */
+/* global chrome, IRCTCUtils */
 
 (function () {
   const {
@@ -667,6 +667,7 @@
     await humanDelay(140, 260);
     searchButton.click();
     await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
+    updateProgressOverlay(1, "complete");
     return { submitted: true };
   }
 
@@ -695,9 +696,8 @@
   }
 
   const runSearchAutomation = (journeyConfig, isAvailabilityMode) => {
-    mountProgressOverlay("Filling journey search form...");
-    updateProgressOverlay("login", "complete");
-    updateProgressOverlay("search", "active", "Filling journey search form...");
+    mountProgressOverlay();
+    updateProgressOverlay(1, "active");
     return withRetry(() => runSearchAutomationImpl(journeyConfig, isAvailabilityMode), "Search form fill", 3)
       .finally(() => unmountProgressOverlay());
   };
@@ -730,12 +730,36 @@
     if (!input) {
       throw await createUserVisibleError("Journey date field is missing.");
     }
+
     const displayDate = formatDateForIrctc(isoDate);
     input.removeAttribute("readonly");
     input.focus();
-    input.value = displayDate;
-    dispatchAllEvents(input);
+
+    // Use the native setter to bypass Angular's value wrapping,
+    // then fire synthetic events so Angular's zone picks up the change.
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype, "value"
+    )?.set;
+
+    if (nativeSetter) {
+      nativeSetter.call(input, displayDate);
+    } else {
+      input.value = displayDate;
+    }
+
+    input.dispatchEvent(new Event("input",  { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new Event("blur",   { bubbles: true }));
     await humanDelay();
+
+    // Verify Angular picked it up; fall back to character-by-character
+    // typing if the value is still wrong.
+    if (input.value !== displayDate) {
+      await clearAndType(input, displayDate);
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur",   { bubbles: true }));
+      await humanDelay();
+    }
   }
 
   function formatDateForIrctc(isoDate) {
@@ -916,6 +940,7 @@
     }
     continueButton.click();
     await saveCheckpoint("STEP_COMPLETED_PAX", journeyConfig);
+    updateProgressOverlay(3, "complete");
     await updateStatus("active", "Continuing to payment handoff...", [
       { label: "Passenger details filled", state: "complete" },
       { label: "User confirmed details", state: "complete" },
@@ -925,8 +950,8 @@
   }
 
   const runPassengerAutomation = (journeyConfig) => {
-    mountProgressOverlay("Completing passenger details...");
-    updateProgressOverlay("pax", "active", "Completing passenger details...");
+    mountProgressOverlay();
+    updateProgressOverlay(3, "active");
     return withRetry(() => runPassengerAutomationImpl(journeyConfig), "Passenger details fill", 3)
       .finally(() => unmountProgressOverlay());
   };
@@ -1036,13 +1061,7 @@
     const fallbackMobile = journeyConfig.preferences?.fallbackMobile || defaults.fallbackMobile || "";
     const mobileInput = await findByLabelText(/mobile/i, { skipIfMissing: true });
     if (mobileInput && fallbackMobile) {
-      const currentDigits = String(mobileInput.value || "").replace(/\D/g, "");
-      const fallbackDigits = String(fallbackMobile || "").replace(/\D/g, "");
-      if (!currentDigits || currentDigits.length < 10) {
-        await clearAndType(mobileInput, fallbackMobile);
-      } else if (currentDigits === fallbackDigits) {
-        showStatusToast("Contact mobile verified", "success");
-      }
+      await clearAndType(mobileInput, fallbackMobile);
     }
 
     await setCheckboxByLabel(/auto upgrad/i, Boolean(journeyConfig.preferences?.autoUpgrade), true);
@@ -1165,13 +1184,13 @@
     const activeJourney = await getResolvedJourneyConfig(journeyConfig);
     const autoSelectTrain = Boolean(activeJourney?.autoSelectTrain || activeJourney?.metadata?.autoSelectTrain);
     await saveCheckpoint("STEP_WAITING_TRAIN_SELECT", activeJourney);
-    mountProgressOverlay("Preparing train selection...");
-    updateProgressOverlay("train", "active", "Preparing train selection...");
+    mountProgressOverlay();
+    updateProgressOverlay(2, "active");
 
     if (!autoSelectTrain) {
       await showReadyBadge();
       await maybeGenerateTrainRecommendation(activeJourney);
-      updateProgressOverlay("train", "active", "Waiting for manual train selection.");
+      updateProgressOverlay(2, "active");
       return {};
     }
 
@@ -1235,8 +1254,8 @@
   async function reportBookingCompleted() {
     const journeyConfig = await getResolvedJourneyConfig(contentState.activeConfig);
     await saveCheckpoint("STEP_COMPLETED_PAYMENT", journeyConfig);
-    mountProgressOverlay("Payment page ready.");
-    updateProgressOverlay("payment", "complete", "Payment page ready.");
+    mountProgressOverlay();
+    updateProgressOverlay(4, "complete");
     setTimeout(() => unmountProgressOverlay(), 5000);
     const trainName = document.querySelector(".train-heading, .train-name, h5")?.textContent?.trim() || "";
     await safeSendRuntimeMessage({
@@ -1446,7 +1465,7 @@
       }
     });
 
-    mountProgressOverlay(contentState.progressMessage || "Tracking booking progress...");
+    mountProgressOverlay();
     updateProgressFromCheckpoint(step);
 
     if (step === "STEP_COMPLETED_PAYMENT") {
@@ -1591,8 +1610,8 @@
       case "STEP_COMPLETED_PAX":
         if (currentPage === "PAYMENT") {
           showStatusToast("You are at payment page — please complete payment.", "info");
-          mountProgressOverlay("Payment page ready.");
-          updateProgressOverlay("payment", "complete", "Payment page ready.");
+          mountProgressOverlay();
+          updateProgressOverlay(4, "complete");
           return { resumed: true };
         }
         if (currentPage === "PAX") {
@@ -1610,8 +1629,8 @@
         return { navigating: true };
       case "STEP_COMPLETED_PAYMENT":
         showStatusToast("Booking already reached payment. Please complete payment.", "info");
-        mountProgressOverlay("Payment page ready.");
-        updateProgressOverlay("payment", "complete", "Payment page ready.");
+        mountProgressOverlay();
+        updateProgressOverlay(4, "complete");
         return { resumed: currentPage === "PAYMENT" };
       default:
         return { resumed: false };
@@ -1676,6 +1695,7 @@
       await showReadyBadge("Auto-selecting the best train...");
       showStatusToast("Waiting for train list to load...", "info");
       await waitForTrainCards();
+      updateProgressOverlay(2, "active");
       await humanDelay();
 
       if (await detectAndHandleCaptcha("STEP_WAITING_TRAIN_SELECT", { action: "train-auto-select" })) {
@@ -1751,6 +1771,7 @@
       showStatusToast(`Book Now found for ${selection.train.trainNumber}. Booking...`, "success");
       bookNowButton.click();
       await saveCheckpoint("STEP_COMPLETED_TRAIN_SELECT", journeyConfig);
+      updateProgressOverlay(2, "complete");
       await humanDelay(200, 340);
 
       await updateStatus("active", `Book Now clicked for ${selection.train.trainName}. Moving to passenger details...`, [
@@ -1918,26 +1939,50 @@
   }
 
   async function autoRefreshSeats() {
-    const candidates = Array.from(document.querySelectorAll("button, input[type='button'], a"))
-      .filter((element) => isVisible(element))
-      .filter((element) => {
-        const label = normalizeText(element.textContent || element.value || element.getAttribute("aria-label") || "");
-        return /refresh|re[- ]?check|update|reload/i.test(label);
-      });
+    const cardSelector = "app-train-list, .train-avl-enq-box, .train-list .train-row, .tbis-div";
+    const cards = Array.from(document.querySelectorAll(cardSelector));
+    let totalClicked = 0;
 
-    const beforeSnapshot = captureAvailabilitySnapshot();
+    for (const card of cards) {
+      const refreshButtons = Array.from(card.querySelectorAll("button, a"))
+        .filter((element) => {
+          const label = normalizeText(
+            element.textContent || element.value || element.getAttribute("aria-label") || ""
+          );
+          return /refresh|re-?check|update|reload/i.test(label);
+        })
+        .filter((element) => isVisible(element));
 
-    if (candidates.length) {
-      for (const candidate of candidates) {
-        candidate.click();
-        await humanDelay(120, 240);
+      for (const btn of refreshButtons) {
+        btn.click();
+        totalClicked += 1;
+        await humanDelay(160, 260);
       }
-      await waitForAvailabilityRefresh(beforeSnapshot);
+    }
+
+    if (totalClicked > 0) {
       await waitForTrainCards();
       return;
     }
 
-    await waitForAvailabilityRefresh(beforeSnapshot, true);
+    // FALLBACK: no per-card buttons found — try global scan
+    const globalCandidate = Array.from(document.querySelectorAll("button, input[type='button'], a"))
+      .filter((element) => isVisible(element))
+      .find((element) => {
+        const label = normalizeText(
+          element.textContent || element.value || element.getAttribute("aria-label") || ""
+        );
+        return /refresh|re-?check|update|reload/i.test(label);
+      });
+
+    if (globalCandidate) {
+      globalCandidate.click();
+      await humanDelay(520, 780);
+      await waitForTrainCards();
+      return;
+    }
+
+    await sleep(900);
   }
 
   async function findElement(purpose, selectors) {
@@ -2085,9 +2130,6 @@
   }
 
   async function updateStatus(phase, message, steps) {
-    if (message) {
-      updateProgressOverlay(message);
-    }
     await safeSendRuntimeMessage({
       type: "UPDATE_STATUS",
       payload: {
@@ -2108,8 +2150,17 @@
   }
 
   function isVisible(element) {
+    if (!element) return false;
     const style = window.getComputedStyle(element);
-    return style.visibility !== "hidden" && style.display !== "none";
+    if (style.display === "none") return false;
+    if (style.visibility === "hidden") return false;
+    if (style.opacity === "0") return false;
+    if (element.offsetWidth === 0 && element.offsetHeight === 0) {
+      // Allow elements that are position:fixed/absolute and off-layout
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return false;
+    }
+    return true;
   }
 
   function showStatusToast(message, type = "info") {
@@ -2151,159 +2202,199 @@
   }
 
   async function withRetry(action, purpose, attempts = 3) {
-    const delays = [2000, 5000, 12000];
+    const BACKOFF_MS = [2000, 5000, 12000];
     let lastError = null;
+
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         return await action();
       } catch (error) {
         lastError = error;
         if (attempt < attempts) {
-          showStatusToast(`Retrying ${purpose} (${attempt + 1}/${attempts})...`, "info");
-          await sleep(delays[Math.min(attempt - 1, delays.length - 1)]);
+          showStatusToast(
+            `Retrying ${purpose} (${attempt + 1}/${attempts})...`,
+            "info"
+          );
+          await sleep(BACKOFF_MS[attempt - 1] ?? 2000);
         }
       }
     }
+
+    // All attempts exhausted — surface a permanent error to the user.
     contentState.activeConfig = null;
-    showPersistentErrorToast(`${purpose} failed after ${attempts} attempts. You can dismiss this and continue manually.`);
+
+    mountTerminalErrorBanner(
+      `${purpose} failed after ${attempts} attempts — ` +
+      `please reload the page and try again.`
+    );
+
+    await safeSendRuntimeMessage({
+      type: "SHOW_NOTIFICATION",
+      payload: {
+        title: "IRCTC AutoFill — Automation Failed",
+        message: `${purpose} could not complete after ${attempts} retries.`
+      }
+    });
+
     throw lastError;
   }
 
-  function mountProgressOverlay(message = "IRCTC AutoFill is working...") {
+  function mountTerminalErrorBanner(message) {
+    const existing = document.getElementById("irctc-autofill-error-banner");
+    if (existing) existing.remove();
+
+    const banner = document.createElement("div");
+    banner.id = "irctc-autofill-error-banner";
+    banner.style.cssText = [
+      "position:fixed",
+      "bottom:0",
+      "left:0",
+      "right:0",
+      "z-index:2147483647",
+      "background:#B71C1C",
+      "color:#fff",
+      "font:14px/1.45 'Segoe UI',sans-serif",
+      "padding:14px 16px",
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:12px",
+      "box-shadow:0 -8px 28px rgba(0,0,0,0.28)"
+    ].join(";");
+
+    banner.innerHTML = `
+      <div>❌ ${escapeHtml(message)}</div>
+      <button id="irctc-error-dismiss" type="button"
+        style="border:0;border-radius:10px;padding:9px 12px;
+               background:rgba(255,255,255,0.18);color:#fff;
+               font-weight:700;cursor:pointer;flex-shrink:0;">
+        Dismiss
+      </button>
+    `;
+    document.body.appendChild(banner);
+    banner.querySelector("#irctc-error-dismiss")
+      .addEventListener("click", () => banner.remove());
+  }
+
+  function mountProgressOverlay() {
     if (document.getElementById("irctc-autofill-progress-overlay")) {
-      updateProgressOverlay(message);
       return;
     }
+
+    // Inject spin keyframes if not already present
+    if (!document.getElementById("irctc-progress-spin-style")) {
+      const styleEl = document.createElement("style");
+      styleEl.id = "irctc-progress-spin-style";
+      styleEl.textContent = `@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`;
+      document.documentElement.appendChild(styleEl);
+    }
+
+    const STEP_LABELS = ["Login", "Search", "Select Train", "Passenger Details", "Payment"];
 
     const overlay = document.createElement("div");
     overlay.id = "irctc-autofill-progress-overlay";
     overlay.style.cssText = [
       "position:fixed",
+      "bottom:18px",
       "right:18px",
-      "bottom:88px",
-      "z-index:2147483646",
-      "width:320px",
-      "max-width:calc(100vw - 24px)"
-    ].join(";");
-
-    const panel = document.createElement("div");
-    panel.style.cssText = [
-      "background:#fff",
-      "border-radius:20px",
-      "padding:16px",
-      "box-shadow:0 24px 75px rgba(0,0,0,0.22)",
+      "width:270px",
+      "z-index:2147483645",
+      "background:linear-gradient(180deg,rgba(26,35,126,0.97),rgba(26,35,126,0.84))",
+      "color:#fff",
+      "border-radius:18px",
+      "box-shadow:0 22px 55px rgba(20,35,90,0.3)",
       "font:13px/1.45 'Segoe UI',sans-serif",
-      "border:1px solid rgba(26,35,126,0.12)"
+      "overflow:hidden"
     ].join(";");
 
+    // Header row
     const header = document.createElement("div");
-    header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;";
+    header.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:10px 14px;";
     header.innerHTML = `
-      <strong style="color:#1a237e;">Booking Progress</strong>
-      <button id="irctc-progress-minimize" type="button" style="border:0;border-radius:10px;padding:6px 10px;background:#eef2ff;color:#1a237e;font-weight:700;cursor:pointer;">-</button>
+      <strong style="font-size:12px;">⚡ IRCTC AutoFill</strong>
+      <button id="irctc-progress-minimize" type="button"
+        style="border:0;border-radius:8px;padding:4px 9px;background:rgba(255,255,255,0.16);color:#fff;font-weight:700;cursor:pointer;font-size:14px;">−</button>
     `;
 
-    const text = document.createElement("div");
-    text.id = "irctc-autofill-progress-text";
-    text.textContent = message;
-    text.style.marginBottom = "12px";
-    text.style.fontWeight = "700";
-    text.style.color = "#1a237e";
+    // Step list
+    const stepList = document.createElement("ul");
+    stepList.id = "irctc-progress-steps";
+    stepList.style.cssText = "list-style:none;margin:0;padding:4px 14px 14px;display:grid;gap:6px;";
 
-    const stepList = document.createElement("div");
-    stepList.id = "irctc-autofill-progress-steps";
-    stepList.style.cssText = "display:grid;gap:8px;";
-    PROGRESS_STEPS.forEach((step) => {
-      const item = document.createElement("div");
-      item.dataset.stepId = step.id;
-      item.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border-radius:12px;background:#f7f8fb;";
-      item.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span class="irctc-progress-dot" style="width:12px;height:12px;border-radius:999px;background:#c4c9d4;display:inline-block;"></span>
-          <span>${step.label}</span>
-        </div>
-        <span class="irctc-progress-state" style="font-size:11px;color:#6b7280;">Pending</span>
+    STEP_LABELS.forEach((label, index) => {
+      const li = document.createElement("li");
+      li.dataset.stepIndex = String(index);
+      li.dataset.stepState = "pending";
+      li.style.cssText = "display:flex;align-items:center;gap:10px;opacity:0.45;";
+      li.innerHTML = `
+        <span class="irctc-step-indicator" style="width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:#999;">●</span>
+        <span class="irctc-step-label" style="font-size:12px;">${label}</span>
       `;
-      stepList.appendChild(item);
+      stepList.appendChild(li);
     });
 
-    let style = document.getElementById("irctc-autofill-progress-style");
-    if (!style) {
-      style = document.createElement("style");
-      style.id = "irctc-autofill-progress-style";
-      style.textContent = `
-        @keyframes irctc-progress-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        #irctc-autofill-progress-overlay.minimized #irctc-autofill-progress-text,
-        #irctc-autofill-progress-overlay.minimized #irctc-autofill-progress-steps {
-          display: none;
-        }
-      `;
-      document.documentElement.appendChild(style);
-    }
-
-    panel.appendChild(header);
-    panel.appendChild(text);
-    panel.appendChild(stepList);
-    overlay.appendChild(panel);
+    overlay.appendChild(header);
+    overlay.appendChild(stepList);
     document.body.appendChild(overlay);
-    overlay.querySelector("#irctc-progress-minimize")?.addEventListener("click", () => {
-      contentState.progressMinimized = !contentState.progressMinimized;
-      overlay.classList.toggle("minimized", contentState.progressMinimized);
-      overlay.querySelector("#irctc-progress-minimize").textContent = contentState.progressMinimized ? "+" : "-";
+
+    // Minimize toggle
+    overlay.querySelector("#irctc-progress-minimize").addEventListener("click", () => {
+      const isMinimized = overlay.classList.toggle("minimized");
+      contentState.progressMinimized = isMinimized;
+      stepList.style.display = isMinimized ? "none" : "grid";
+      overlay.querySelector("#irctc-progress-minimize").textContent = isMinimized ? "+" : "−";
     });
-    resetProgressOverlay();
-    updateProgressOverlay(message);
   }
 
-  function updateProgressOverlay(stepOrMessage, state = null, message = "") {
-    const text = document.getElementById("irctc-autofill-progress-text");
-    if (typeof stepOrMessage === "string" && state === null) {
-      contentState.progressMessage = stepOrMessage;
-      if (text) {
-        text.textContent = stepOrMessage;
-      }
+  function updateProgressOverlay(stepIndex, state) {
+    if (typeof stepIndex !== "number" || stepIndex < 0 || stepIndex > 4) {
+      return;
+    }
+    const stepsContainer = document.getElementById("irctc-progress-steps");
+    if (!stepsContainer) {
       return;
     }
 
-    if (text && message) {
-      text.textContent = message;
+    // When a step becomes active, auto-complete all lower-index pending steps
+    if (state === "active") {
+      const allItems = stepsContainer.querySelectorAll("li[data-step-index]");
+      allItems.forEach((li) => {
+        const idx = Number(li.dataset.stepIndex);
+        if (idx < stepIndex && li.dataset.stepState === "pending") {
+          applyStepVisual(li, "complete");
+        }
+      });
     }
 
-    const item = document.querySelector(`[data-step-id="${stepOrMessage}"]`);
-    if (!item) {
-      return;
+    const targetLi = stepsContainer.querySelector(`li[data-step-index="${stepIndex}"]`);
+    if (targetLi) {
+      applyStepVisual(targetLi, state);
     }
+  }
 
-    const dot = item.querySelector(".irctc-progress-dot");
-    const label = item.querySelector(".irctc-progress-state");
-    if (!dot || !label) {
-      return;
-    }
+  function applyStepVisual(li, state) {
+    li.dataset.stepState = state;
+    const indicator = li.querySelector(".irctc-step-indicator");
+    const label = li.querySelector(".irctc-step-label");
+    if (!indicator || !label) return;
 
     if (state === "complete") {
-      dot.style.background = "#1f9d57";
-      dot.style.border = "0";
-      dot.style.animation = "none";
-      label.textContent = "Complete";
-      label.style.color = "#1f9d57";
-      return;
+      li.style.opacity = "1";
+      indicator.innerHTML = "✓";
+      indicator.style.cssText = "width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:#69f0ae;";
+      label.style.cssText = "font-size:12px;color:#fff;text-decoration:line-through;";
+    } else if (state === "active") {
+      li.style.opacity = "1";
+      indicator.innerHTML = "";
+      indicator.style.cssText = "width:14px;height:14px;border:2px solid #fff;border-top-color:#4fc3f7;border-radius:50%;animation:spin 0.8s linear infinite;display:inline-block;box-sizing:border-box;";
+      label.style.cssText = "font-size:12px;color:#fff;font-weight:700;";
+    } else {
+      // pending
+      li.style.opacity = "0.45";
+      indicator.innerHTML = "●";
+      indicator.style.cssText = "width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:#999;";
+      label.style.cssText = "font-size:12px;color:#aaa;";
     }
-
-    if (state === "active") {
-      dot.style.background = "transparent";
-      dot.style.border = "2px solid #1a73e8";
-      dot.style.borderTopColor = "transparent";
-      dot.style.animation = "irctc-progress-spin 1s linear infinite";
-      label.textContent = "Active";
-      label.style.color = "#1a73e8";
-      return;
-    }
-
-    dot.style.background = "#c4c9d4";
-    dot.style.border = "0";
-    dot.style.animation = "none";
-    label.textContent = "Pending";
-    label.style.color = "#6b7280";
   }
 
   function unmountProgressOverlay() {
@@ -2314,65 +2405,51 @@
   }
 
   function resetProgressOverlay() {
-    PROGRESS_STEPS.forEach((step) => updateProgressOverlay(step.id, "pending"));
+    for (let i = 0; i <= 4; i += 1) {
+      updateProgressOverlay(i, "pending");
+    }
     const page = getCurrentPage();
     if (page === "LOGIN") {
-      updateProgressOverlay("login", "active");
+      updateProgressOverlay(0, "active");
     } else if (page === "SEARCH") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "active");
+      updateProgressOverlay(0, "complete");
+      updateProgressOverlay(1, "active");
     } else if (page === "TRAIN_LIST") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "active");
+      updateProgressOverlay(1, "complete");
+      updateProgressOverlay(2, "active");
     } else if (page === "PAX") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "complete");
-      updateProgressOverlay("pax", "active");
+      updateProgressOverlay(2, "complete");
+      updateProgressOverlay(3, "active");
     } else if (page === "PAYMENT") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "complete");
-      updateProgressOverlay("pax", "complete");
-      updateProgressOverlay("payment", "complete");
+      updateProgressOverlay(3, "complete");
+      updateProgressOverlay(4, "complete");
     }
   }
 
   function updateProgressFromCheckpoint(step) {
     resetProgressOverlay();
     if (step === "STEP_COMPLETED_LOGIN") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "active");
+      updateProgressOverlay(0, "complete");
+      updateProgressOverlay(1, "active");
       return;
     }
     if (step === "STEP_COMPLETED_SEARCH" || step === "STEP_WAITING_TRAIN_SELECT") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "active");
+      updateProgressOverlay(1, "complete");
+      updateProgressOverlay(2, "active");
       return;
     }
     if (step === "STEP_COMPLETED_TRAIN_SELECT") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "complete");
-      updateProgressOverlay("pax", "active");
+      updateProgressOverlay(2, "complete");
+      updateProgressOverlay(3, "active");
       return;
     }
     if (step === "STEP_COMPLETED_PAX") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "complete");
-      updateProgressOverlay("pax", "complete");
-      updateProgressOverlay("payment", "active");
+      updateProgressOverlay(3, "complete");
+      updateProgressOverlay(4, "active");
       return;
     }
     if (step === "STEP_COMPLETED_PAYMENT") {
-      updateProgressOverlay("login", "complete");
-      updateProgressOverlay("search", "complete");
-      updateProgressOverlay("train", "complete");
-      updateProgressOverlay("pax", "complete");
-      updateProgressOverlay("payment", "complete");
+      updateProgressOverlay(4, "complete");
     }
   }
 
@@ -2876,6 +2953,7 @@
   }
 
   async function showPaymentToast() {
+    updateProgressOverlay(4, "complete");
     let toast = document.getElementById("irctc-autofill-payment-toast");
     if (!toast) {
       toast = document.createElement("div");
