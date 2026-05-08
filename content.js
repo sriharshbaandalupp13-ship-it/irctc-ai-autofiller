@@ -10,8 +10,6 @@
     normalizeText,
     serializeDomForGemini,
     callGeminiSelector,
-    getStorage,
-    setStorage,
     STORAGE_KEYS,
     scoreTrainRecommendation,
     NATIONALITY_DEFAULT
