@@ -38,11 +38,12 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "utils.js",
         "popup.css",
         "options.css"
       ],
       "matches": [
-        "https://www.irctc.co.in/*"
+        "<all_urls>"
       ]
     }
   ]

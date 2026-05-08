@@ -132,6 +132,27 @@
               <input id="geminiApiKey" type="password" placeholder="Stored locally in chrome.storage.local">
             </label>
             <div class="quick-booking-block">
+              <h3>🔒 Login Credentials</h3>
+              <div class="grid two">
+                <label>
+                  <span>Username / User ID</span>
+                  <input id="loginUsername" type="text" placeholder="Stored locally using base64">
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input id="loginPassword" type="password" placeholder="Stored locally using base64">
+                </label>
+              </div>
+              <label class="toggle-row">
+                <span>Enable Auto Login</span>
+                <input id="autoLogin" type="checkbox">
+              </label>
+              <p class="subtext">Credentials are stored locally on your device only and never sent anywhere except IRCTC's own login page</p>
+              <div class="form-actions">
+                <button id="saveCredentialsButton" class="secondary" type="button">Save Credentials</button>
+              </div>
+            </div>
+            <div class="quick-booking-block">
               <h3>Quick Booking Favorites</h3>
               <div class="grid two">
                 <label>

@@ -6,11 +6,10 @@ try {
 
 importScripts("utils.js");
 
-/* global IRCTCUtils, chrome */
+/* global IRCTCUtils, STORAGE_KEYS, IRCTC_URLS, chrome */
 
+/* Functions extracted from IRCTCUtils — constants STORAGE_KEYS/IRCTC_URLS are already global from utils.js */
 const {
-  STORAGE_KEYS,
-  IRCTC_URLS,
   getStorage,
   setStorage,
   getDataBundle,
@@ -35,16 +34,7 @@ const memoryState = {
 
 chrome.runtime.onInstalled.addListener(async () => {
   await initializeLocalSecrets();
-  const data = await getDataBundle();
-  await setStorage({
-    [STORAGE_KEYS.DEFAULT_PREFERENCES]: data.defaultPreferences,
-    [STORAGE_KEYS.PASSENGERS]: data.passengers,
-    [STORAGE_KEYS.GROUPS]: data.groups,
-    [STORAGE_KEYS.SAVED_STATIONS]: data.savedStations,
-    [STORAGE_KEYS.BOOKING_HISTORY]: data.bookingHistory,
-    [STORAGE_KEYS.AVAILABILITY_ALERTS]: data.availabilityAlerts,
-    [STORAGE_KEYS.QUICK_WIDGET_SETTINGS]: data.quickWidgetSettings
-  });
+  await seedStorageDefaults();
   await chrome.alarms.create(ALARM_NAMES.AVAILABILITY_POLL, { periodInMinutes: 30 });
 });
 
@@ -176,6 +166,10 @@ async function handleMessage(message, sender) {
       return deleteAvailabilityAlert(message.payload?.id);
     case "SAVE_QUICK_WIDGET_SETTINGS":
       return saveQuickWidgetSettings(message.payload);
+    case "SET_TATKAL_ALARM":
+      return setTatkalAlarm(message.payload);
+    case "CLEAR_TATKAL_ALARM":
+      return clearTatkalAlarm();
     case "PAGE_READY":
       return handlePageReady(message.payload, sender);
     case "BOOKING_COMPLETED":
@@ -246,18 +240,17 @@ async function saveJourneyDraft(payload) {
     const schedule = computeTatkalTime(journeyConfig);
     const tatkalRushConfig = {
       enabled: true,
+      tatkalClassType: journeyConfig.tatkalClassType || payload?.tatkalClassType || inferTatkalClassType(journeyConfig),
       slotLabel: schedule.slotLabel,
       scheduledFor: schedule.startAt.toISOString(),
       reminderFor: schedule.reminderAt.toISOString(),
       journeyConfig
     };
     write[STORAGE_KEYS.TATKAL_RUSH_CONFIG] = tatkalRushConfig;
-    await chrome.alarms.create(ALARM_NAMES.TATKAL_START, { when: schedule.startAt.getTime() });
-    await chrome.alarms.create(ALARM_NAMES.TATKAL_REMINDER, { when: schedule.reminderAt.getTime() });
+    await scheduleTatkalAlarms(tatkalRushConfig);
   } else {
     write[STORAGE_KEYS.TATKAL_RUSH_CONFIG] = null;
-    await chrome.alarms.clear(ALARM_NAMES.TATKAL_START);
-    await chrome.alarms.clear(ALARM_NAMES.TATKAL_REMINDER);
+    await clearTatkalAlarm();
   }
 
   await setStorage(write);
@@ -277,6 +270,7 @@ async function startBookingFlow(payload, sender) {
   });
 
   await setStorage({
+    [STORAGE_KEYS.BOOKING_CHECKPOINT]: null,
     [STORAGE_KEYS.ACTIVE_BOOKING]: {
       mode: "booking",
       journeyConfig,
@@ -551,6 +545,90 @@ async function getActiveBooking() {
 async function getRecommendation() {
   const { [STORAGE_KEYS.LATEST_RECOMMENDATION]: latestRecommendation } = await getStorage([STORAGE_KEYS.LATEST_RECOMMENDATION]);
   return { latestRecommendation };
+}
+
+async function seedStorageDefaults() {
+  const data = await getDataBundle();
+  const write = {};
+
+  if (!(await hasStoredValue(STORAGE_KEYS.DEFAULT_PREFERENCES))) {
+    write[STORAGE_KEYS.DEFAULT_PREFERENCES] = data.defaultPreferences;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.PASSENGERS))) {
+    write[STORAGE_KEYS.PASSENGERS] = data.passengers;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.GROUPS))) {
+    write[STORAGE_KEYS.GROUPS] = data.groups;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.SAVED_STATIONS))) {
+    write[STORAGE_KEYS.SAVED_STATIONS] = data.savedStations;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.BOOKING_HISTORY))) {
+    write[STORAGE_KEYS.BOOKING_HISTORY] = data.bookingHistory;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.AVAILABILITY_ALERTS))) {
+    write[STORAGE_KEYS.AVAILABILITY_ALERTS] = data.availabilityAlerts;
+  }
+  if (!(await hasStoredValue(STORAGE_KEYS.QUICK_WIDGET_SETTINGS))) {
+    write[STORAGE_KEYS.QUICK_WIDGET_SETTINGS] = data.quickWidgetSettings;
+  }
+
+  if (Object.keys(write).length) {
+    await setStorage(write);
+  }
+}
+
+async function hasStoredValue(key) {
+  const values = await getStorage([key]);
+  return Object.prototype.hasOwnProperty.call(values, key);
+}
+
+async function setTatkalAlarm(payload) {
+  const journeyConfig = buildJourneyConfig(payload?.journeyConfig || {});
+  const tatkalClassType = payload?.tatkalClassType || journeyConfig.tatkalClassType || inferTatkalClassType(journeyConfig);
+  const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType));
+  const tatkalRushConfig = {
+    enabled: true,
+    tatkalClassType,
+    slotLabel: schedule.slotLabel,
+    scheduledFor: schedule.startAt.toISOString(),
+    reminderFor: schedule.reminderAt.toISOString(),
+    journeyConfig
+  };
+
+  await scheduleTatkalAlarms(tatkalRushConfig);
+  await setStorage({
+    [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig
+  });
+
+  return { tatkalRushConfig };
+}
+
+async function clearTatkalAlarm() {
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_START);
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_REMINDER);
+  return {};
+}
+
+async function scheduleTatkalAlarms(tatkalRushConfig) {
+  const journeyConfig = tatkalRushConfig?.journeyConfig || {};
+  const tatkalClassType = tatkalRushConfig?.tatkalClassType || inferTatkalClassType(journeyConfig);
+  const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType));
+
+  await clearTatkalAlarm();
+  await chrome.alarms.create(ALARM_NAMES.TATKAL_START, { when: schedule.startAt.getTime() });
+  await chrome.alarms.create(ALARM_NAMES.TATKAL_REMINDER, { when: schedule.reminderAt.getTime() });
+}
+
+function getTatkalScheduleJourney(journeyConfig, tatkalClassType) {
+  if (tatkalClassType === "sleeper") {
+    return { ...journeyConfig, journeyClass: "SL" };
+  }
+  return { ...journeyConfig, journeyClass: journeyConfig?.journeyClass || "3A" };
+}
+
+function inferTatkalClassType(journeyConfig) {
+  return String(journeyConfig?.journeyClass || "").trim().toUpperCase() === "SL" ? "sleeper" : "ac";
 }
 
 function pushPopupEvent(type, payload) {

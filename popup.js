@@ -7,6 +7,10 @@
     PAYMENT_MODES,
     todayISO,
     DEFAULT_PREFERENCES,
+    STORAGE_KEYS,
+    getStorage,
+    setStorage,
+    computeTatkalTime,
     formatTimestamp,
     summarizeConfig
   } = IRCTCUtils;
@@ -21,7 +25,9 @@
     runtimeStatus: null,
     recommendation: null,
     selectedPassengerIds: new Set(),
-    availabilityResults: null
+    availabilityResults: null,
+    tatkalRushConfig: null,
+    bookingCheckpoint: null
   };
 
   const elements = {};
@@ -47,18 +53,28 @@
       "passengerCount",
       "journeyClass",
       "quota",
+      "autoSelectTrain",
       "travelInsurance",
       "autoUpgrade",
       "onlyConfirmBerths",
       "paymentMode",
       "preferredCoach",
       "reservationChoice",
+      "tatkalClassAc",
+      "tatkalClassSleeper",
+      "tatkalClassBoth",
+      "tatkalSlotDisplay",
+      "tatkalReminderDisplay",
+      "tatkalAlarmStatus",
+      "armTatkalButton",
+      "disarmTatkalButton",
       "statusCard",
       "statusPhase",
       "statusMessage",
       "statusSteps",
       "passengerCards",
       "openOptionsButton",
+      "resumeBookingButton",
       "startBookingButton",
       "saveConfigButton",
       "recommendationCard",
@@ -107,10 +123,25 @@
     });
 
     elements.openOptionsButton.addEventListener("click", () => sendMessage({ type: "OPEN_OPTIONS" }));
+    elements.resumeBookingButton.addEventListener("click", resumeLastBooking);
     elements.saveConfigButton.addEventListener("click", saveSetup);
     elements.startBookingButton.addEventListener("click", startBooking);
     elements.checkAvailabilityButton.addEventListener("click", checkAvailability);
     elements.saveAlertButton.addEventListener("click", saveAvailabilityAlert);
+    elements.tatkalRushMode.addEventListener("change", async () => {
+      syncAutoSelectConstraint();
+      updateTatkalDisplays();
+      await persistDraftSilently();
+    });
+    elements.autoSelectTrain.addEventListener("change", persistDraftSilently);
+    [elements.tatkalClassAc, elements.tatkalClassSleeper, elements.tatkalClassBoth].forEach((radio) => {
+      radio.addEventListener("change", async () => {
+        updateTatkalDisplays();
+        await persistDraftSilently();
+      });
+    });
+    elements.armTatkalButton.addEventListener("click", armTatkalRush);
+    elements.disarmTatkalButton.addEventListener("click", disarmTatkalRush);
   }
 
   function connectPort() {
@@ -142,6 +173,8 @@
     state.journeyDraft = response.journeyDraft || null;
     state.runtimeStatus = response.runtimeStatus || null;
     state.recommendation = response.latestRecommendation || null;
+    state.tatkalRushConfig = response.tatkalRushConfig || null;
+    state.bookingCheckpoint = await getValidCheckpoint();
     applyDraft();
     renderStations();
     renderPassengerCards();
@@ -149,6 +182,9 @@
     renderRecommendation();
     renderAvailabilityAlerts();
     renderHistory();
+    renderResumeBookingButton();
+    updateTatkalDisplays();
+    await refreshTatkalAlarmStatus();
   }
 
   async function hydrateCurrentTabContext() {
@@ -162,7 +198,11 @@
   function applyDraft() {
     const draft = state.journeyDraft;
     if (!draft) {
+      elements.tatkalRushMode.checked = false;
+      elements.autoSelectTrain.checked = false;
+      applyTatkalClassType("ac");
       applyPreferences(DEFAULT_PREFERENCES);
+      syncAutoSelectConstraint();
       return;
     }
 
@@ -173,8 +213,11 @@
     elements.journeyClass.value = draft.journeyClass || "3A";
     elements.quota.value = draft.quota || "General";
     elements.tatkalRushMode.checked = Boolean(draft.tatkalRushMode);
+    elements.autoSelectTrain.checked = Boolean(draft.autoSelectTrain || draft.metadata?.autoSelectTrain);
     state.selectedPassengerIds = new Set(draft.selectedPassengerIds || []);
+    applyTatkalClassType(state.tatkalRushConfig?.tatkalClassType || inferTatkalClassType(draft));
     applyPreferences(draft.preferences || DEFAULT_PREFERENCES);
+    syncAutoSelectConstraint();
   }
 
   function applyPreferences(preferences) {
@@ -187,6 +230,8 @@
   }
 
   function readForm() {
+    const tatkalRushMode = elements.tatkalRushMode.checked;
+    const autoSelectTrain = tatkalRushMode ? true : elements.autoSelectTrain.checked;
     return {
       fromStation: elements.fromStation.value.trim(),
       toStation: elements.toStation.value.trim(),
@@ -203,7 +248,12 @@
         preferredCoach: elements.preferredCoach.value.trim(),
         reservationChoice: elements.reservationChoice.value.trim()
       },
-      tatkalRushMode: elements.tatkalRushMode.checked
+      tatkalRushMode,
+      autoSelectTrain,
+      tatkalClassType: getSelectedTatkalClassType(),
+      metadata: {
+        autoSelectTrain
+      }
     };
   }
 
@@ -224,10 +274,12 @@
       const payload = readForm();
       validateForm(payload);
       const response = await sendMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
-      state.journeyDraft = response.journeyDraft;
+      state.journeyDraft = mergeJourneyExtras(response.journeyDraft, payload);
       state.savedStations = response.savedStations || state.savedStations;
+      await persistJourneyExtras(state.journeyDraft, payload);
       renderStations();
       setInlineStatus("ready", `Setup saved. ${summarizeConfig(state.journeyDraft)}`);
+      await refreshTatkalAlarmStatus();
     } catch (error) {
       setInlineStatus("error", error.message);
     }
@@ -237,7 +289,10 @@
     try {
       const payload = readForm();
       validateForm(payload);
-      await sendMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
+      await clearCheckpoint();
+      const saveResponse = await sendMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
+      state.journeyDraft = mergeJourneyExtras(saveResponse.journeyDraft, payload);
+      await persistJourneyExtras(state.journeyDraft, payload);
       setInlineStatus("active", "Starting IRCTC automation...");
       await sendMessage({ type: "START_BOOKING_FLOW", payload });
       window.close();
@@ -454,6 +509,19 @@
     });
   }
 
+  function renderResumeBookingButton() {
+    const checkpoint = state.bookingCheckpoint;
+    if (!checkpoint?.journeyConfig) {
+      elements.resumeBookingButton.classList.add("hidden");
+      elements.resumeBookingButton.textContent = "";
+      return;
+    }
+
+    const route = `${checkpoint.journeyConfig.fromStation} -> ${checkpoint.journeyConfig.toStation}`;
+    elements.resumeBookingButton.textContent = `▶ Resume: ${route} — Last step: ${getCheckpointStepLabel(checkpoint.step)}`;
+    elements.resumeBookingButton.classList.remove("hidden");
+  }
+
   function switchTab(tabName) {
     document.querySelectorAll(".tab-button").forEach((button) => {
       button.classList.toggle("active", button.dataset.tab === tabName);
@@ -500,5 +568,260 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  async function getValidCheckpoint() {
+    const { [STORAGE_KEYS.BOOKING_CHECKPOINT]: checkpoint } = await getStorage([STORAGE_KEYS.BOOKING_CHECKPOINT]);
+    if (!checkpoint?.timestamp) {
+      return null;
+    }
+
+    if (Date.now() - new Date(checkpoint.timestamp).getTime() > 30 * 60 * 1000) {
+      await clearCheckpoint();
+      return null;
+    }
+
+    return checkpoint;
+  }
+
+  async function clearCheckpoint() {
+    state.bookingCheckpoint = null;
+    await setStorage({ [STORAGE_KEYS.BOOKING_CHECKPOINT]: null });
+    renderResumeBookingButton();
+  }
+
+  function getCheckpointStepLabel(step) {
+    return {
+      STEP_COMPLETED_LOGIN: "Login completed",
+      STEP_COMPLETED_SEARCH: "Search submitted",
+      STEP_WAITING_TRAIN_SELECT: "Waiting for train selection",
+      STEP_COMPLETED_TRAIN_SELECT: "Train selected",
+      STEP_COMPLETED_PAX: "Passenger details completed",
+      STEP_COMPLETED_PAYMENT: "Payment handoff reached"
+    }[step] || "In progress";
+  }
+
+  async function resumeLastBooking() {
+    try {
+      const checkpoint = await getValidCheckpoint();
+      state.bookingCheckpoint = checkpoint;
+      renderResumeBookingButton();
+
+      if (!checkpoint?.journeyConfig) {
+        setInlineStatus("error", "No recent booking checkpoint is available.");
+        return;
+      }
+
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id || !tab.url?.startsWith("https://www.irctc.co.in/")) {
+        setInlineStatus("error", "Open an IRCTC tab first, then tap Resume Last Booking.");
+        return;
+      }
+
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "RESUME_BOOKING_FLOW",
+        checkpoint
+      });
+      window.close();
+    } catch (error) {
+      setInlineStatus("error", error.message);
+    }
+  }
+
+  function syncAutoSelectConstraint() {
+    const forced = elements.tatkalRushMode.checked;
+    if (forced) {
+      elements.autoSelectTrain.checked = true;
+    }
+    elements.autoSelectTrain.disabled = forced;
+  }
+
+  function getSelectedTatkalClassType() {
+    if (elements.tatkalClassSleeper.checked) {
+      return "sleeper";
+    }
+    if (elements.tatkalClassBoth.checked) {
+      return "both";
+    }
+    return "ac";
+  }
+
+  function applyTatkalClassType(type = "ac") {
+    elements.tatkalClassAc.checked = type === "ac";
+    elements.tatkalClassSleeper.checked = type === "sleeper";
+    elements.tatkalClassBoth.checked = type === "both";
+  }
+
+  function inferTatkalClassType(draft = {}) {
+    const normalizedClass = String(draft.journeyClass || "").trim().toUpperCase();
+    return normalizedClass === "SL" ? "sleeper" : "ac";
+  }
+
+  function updateTatkalDisplays() {
+    const selectedType = getSelectedTatkalClassType();
+    if (selectedType === "sleeper") {
+      elements.tatkalSlotDisplay.textContent = "Sleeper Tatkal fires at 11:00:00 AM";
+      elements.tatkalReminderDisplay.textContent = "You will be notified at 10:55 AM";
+      return;
+    }
+    if (selectedType === "both") {
+      elements.tatkalSlotDisplay.textContent = "AC Tatkal fires at 10:00:00 AM | Sleeper fires at 11:00:00 AM";
+      elements.tatkalReminderDisplay.textContent = "You will be notified at 9:55 AM / 10:55 AM";
+      return;
+    }
+    elements.tatkalSlotDisplay.textContent = "AC Tatkal fires at 10:00:00 AM";
+    elements.tatkalReminderDisplay.textContent = "You will be notified at 9:55 AM";
+  }
+
+  async function refreshTatkalAlarmStatus() {
+    const alarm = await chrome.alarms.get("tatkal-start");
+    if (!alarm) {
+      elements.tatkalAlarmStatus.textContent = "❌ No alarm set";
+      return;
+    }
+    const when = new Date(alarm.scheduledTime);
+    const dayLabel = isTomorrow(when) ? "tomorrow" : when.toLocaleDateString();
+    const timeLabel = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    elements.tatkalAlarmStatus.textContent = `⏰ Alarm set for ${dayLabel} ${timeLabel}`;
+  }
+
+  function isTomorrow(date) {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    return date.toDateString() === tomorrow.toDateString();
+  }
+
+  function buildTatkalScheduleForType(tatkalClassType, journeyConfig) {
+    if (tatkalClassType === "sleeper") {
+      return computeTatkalTime({ ...journeyConfig, journeyClass: "SL" });
+    }
+    if (tatkalClassType === "ac") {
+      return computeTatkalTime({ ...journeyConfig, journeyClass: "3A" });
+    }
+    return computeTatkalTime(journeyConfig);
+  }
+
+  function mergeJourneyExtras(baseConfig = {}, formData = {}) {
+    return {
+      ...baseConfig,
+      autoSelectTrain: Boolean(formData.autoSelectTrain),
+      tatkalClassType: formData.tatkalClassType || "ac",
+      metadata: {
+        ...(baseConfig.metadata || {}),
+        ...(formData.metadata || {}),
+        autoSelectTrain: Boolean(formData.autoSelectTrain),
+        tatkalClassType: formData.tatkalClassType || "ac"
+      }
+    };
+  }
+
+  async function persistJourneyExtras(journeyDraft, formData) {
+    const draftWithExtras = mergeJourneyExtras(journeyDraft, formData);
+    state.journeyDraft = draftWithExtras;
+    await setStorage({
+      [STORAGE_KEYS.JOURNEY_DRAFT]: draftWithExtras
+    });
+  }
+
+  async function persistDraftSilently() {
+    try {
+      const payload = readForm();
+      const draftWithExtras = mergeJourneyExtras(state.journeyDraft || {}, payload);
+      await setStorage({
+        [STORAGE_KEYS.JOURNEY_DRAFT]: {
+          ...draftWithExtras,
+          fromStation: payload.fromStation,
+          toStation: payload.toStation,
+          journeyDate: payload.journeyDate,
+          journeyClass: payload.journeyClass,
+          quota: payload.quota,
+          passengerCount: payload.passengerCount,
+          selectedPassengerIds: payload.selectedPassengerIds,
+          preferences: payload.preferences,
+          tatkalRushMode: payload.tatkalRushMode
+        }
+      });
+    } catch (error) {
+      /* Silent persistence should not interrupt popup usage. */
+    }
+  }
+
+  async function armTatkalRush() {
+    try {
+      const payload = readForm();
+      validateForm(payload);
+
+      const saveResponse = await sendMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
+      const journeyConfig = {
+        ...mergeJourneyExtras(saveResponse.journeyDraft, {
+          ...payload,
+          autoSelectTrain: true,
+          tatkalRushMode: true
+        }),
+        tatkalRushMode: true
+      };
+      const tatkalClassType = payload.tatkalClassType || "ac";
+      const schedule = buildTatkalScheduleForType(tatkalClassType, journeyConfig);
+
+      try {
+        await sendMessage({
+          type: "SET_TATKAL_ALARM",
+          payload: {
+            tatkalClassType,
+            journeyConfig
+          }
+        });
+      } catch (error) {
+        await chrome.alarms.create("tatkal-start", { when: schedule.startAt.getTime() });
+        await chrome.alarms.create("tatkal-reminder", { when: schedule.reminderAt.getTime() });
+      }
+
+      state.tatkalRushConfig = {
+        enabled: true,
+        tatkalClassType,
+        slotLabel: schedule.slotLabel,
+        scheduledFor: schedule.startAt.toISOString(),
+        reminderFor: schedule.reminderAt.toISOString(),
+        journeyConfig
+      };
+
+      await setStorage({
+        [STORAGE_KEYS.JOURNEY_DRAFT]: journeyConfig,
+        [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: state.tatkalRushConfig
+      });
+
+      elements.tatkalRushMode.checked = true;
+      syncAutoSelectConstraint();
+      await refreshTatkalAlarmStatus();
+      setInlineStatus("ready", "Tatkal Rush armed. The extension will wake up at the next Tatkal slot.");
+    } catch (error) {
+      setInlineStatus("error", error.message);
+    }
+  }
+
+  async function disarmTatkalRush() {
+    try {
+      try {
+        await sendMessage({ type: "CLEAR_TATKAL_ALARM" });
+      } catch (error) {
+        await chrome.alarms.clear("tatkal-start");
+        await chrome.alarms.clear("tatkal-reminder");
+      }
+
+      state.tatkalRushConfig = {
+        ...(state.tatkalRushConfig || {}),
+        enabled: false
+      };
+
+      await setStorage({
+        [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: state.tatkalRushConfig
+      });
+
+      await refreshTatkalAlarmStatus();
+      setInlineStatus("ready", "Tatkal Rush disarmed.");
+    } catch (error) {
+      setInlineStatus("error", error.message);
+    }
   }
 })();

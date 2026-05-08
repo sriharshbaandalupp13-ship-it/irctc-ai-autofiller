@@ -1,5 +1,7 @@
-(function () {
-  const STORAGE_KEYS = {
+/* eslint-disable no-var */
+/* Removed IIFE wrapper for Chrome MV3 service worker importScripts compatibility */
+
+const STORAGE_KEYS = {
     PASSENGERS: "passengers",
     GROUPS: "groups",
     SAVED_STATIONS: "savedStations",
@@ -14,7 +16,10 @@
     LATEST_RECOMMENDATION: "latestRecommendation",
     PENDING_AVAILABILITY_REQUEST: "pendingAvailabilityRequest",
     SIDEBAR_STATE: "sidebarState",
-    QUICK_WIDGET_SETTINGS: "quickWidgetSettings"
+    QUICK_WIDGET_SETTINGS: "quickWidgetSettings",
+    BOOKING_CHECKPOINT: "bookingCheckpoint",
+    LOGIN_CREDS: "loginCreds",
+    AUTO_LOGIN: "autoLogin"
   };
 
   const DEFAULT_PREFERENCES = {
@@ -186,7 +191,10 @@
       STORAGE_KEYS.ACTIVE_BOOKING,
       STORAGE_KEYS.RUNTIME_STATUS,
       STORAGE_KEYS.LATEST_RECOMMENDATION,
-      STORAGE_KEYS.QUICK_WIDGET_SETTINGS
+      STORAGE_KEYS.QUICK_WIDGET_SETTINGS,
+      STORAGE_KEYS.BOOKING_CHECKPOINT,
+      STORAGE_KEYS.LOGIN_CREDS,
+      STORAGE_KEYS.AUTO_LOGIN
     ]);
 
     return {
@@ -205,6 +213,9 @@
       activeBooking: data[STORAGE_KEYS.ACTIVE_BOOKING] || null,
       runtimeStatus: data[STORAGE_KEYS.RUNTIME_STATUS] || null,
       latestRecommendation: data[STORAGE_KEYS.LATEST_RECOMMENDATION] || null,
+      bookingCheckpoint: data[STORAGE_KEYS.BOOKING_CHECKPOINT] || null,
+      loginCreds: data[STORAGE_KEYS.LOGIN_CREDS] || null,
+      autoLogin: Boolean(data[STORAGE_KEYS.AUTO_LOGIN]),
       quickWidgetSettings: {
         ...clone(DEFAULT_QUICK_WIDGET_SETTINGS),
         ...(data[STORAGE_KEYS.QUICK_WIDGET_SETTINGS] || {})
@@ -236,6 +247,8 @@
       selectedPassengers: passengers.slice(0, 6),
       preferences,
       tatkalRushMode: Boolean(raw.tatkalRushMode),
+      autoSelectTrain: Boolean(raw.autoSelectTrain || raw.metadata?.autoSelectTrain),
+      tatkalClassType: raw.tatkalClassType || raw.metadata?.tatkalClassType || "",
       metadata: raw.metadata || {},
       createdAt: raw.createdAt || new Date().toISOString()
     };
@@ -433,4 +446,3 @@
     scoreTrainRecommendation,
     clone
   };
-})();

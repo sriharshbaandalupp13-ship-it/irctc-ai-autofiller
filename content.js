@@ -40,8 +40,8 @@
     ],
     quotaDropdown: [
       "p-dropdown[formcontrolname='quota']",
-      "p-dropdown[placeholder*='Quota']",
-      ".ui-dropdown"
+      "p-dropdown[placeholder*='Quota']"
+      // NOTE: Intentionally NO ".ui-dropdown" fallback — it matches the class dropdown too.
     ],
     searchButton: [
       "button.search_btn",
@@ -66,14 +66,48 @@
     continueButton: [
       "button span:where(:not(script))",
       "button"
+    ],
+    loginUserId: [
+      "input#userId",
+      "input[name='userId']",
+      "input[placeholder*='User']",
+      "input[formcontrolname='userid']"
+    ],
+    loginPassword: [
+      "input#pwd",
+      "input[type='password']",
+      "input[name='password']"
+    ],
+    loginNav: [
+      "a[href*='login']",
+      ".loginText",
+      "li.login a"
+    ],
+    loggedInMarkers: [
+      ".user-name-text",
+      "a[title='My Account']"
     ]
+  };
+
+  const CHECKPOINT_MAX_AGE_MS = 30 * 60 * 1000;
+  const CHECKPOINT_STEP_LABELS = {
+    STEP_COMPLETED_LOGIN: "Login completed",
+    STEP_COMPLETED_SEARCH: "Search submitted",
+    STEP_WAITING_TRAIN_SELECT: "Waiting for train selection",
+    STEP_COMPLETED_TRAIN_SELECT: "Train selected",
+    STEP_COMPLETED_PAX: "Passenger details completed",
+    STEP_COMPLETED_PAYMENT: "Payment handoff reached"
   };
 
   const contentState = {
     activeConfig: null,
     widgetMounted: false,
     observerStarted: false,
-    widgetData: null
+    widgetData: null,
+    trainListHandledForUrl: "",
+    resumeBannerVisible: false,
+    autoLoginInFlight: false,
+    autoOkWatcherStarted: false
   };
 
   init();
@@ -88,11 +122,17 @@
   async function init() {
     mountAssistantWidget();
     await loadWidgetState();
+    startAutoOkWatcher();
+    const loginOutcome = await maybeHandleAutoLogin();
+    if (loginOutcome?.navigating) {
+      return;
+    }
+    await waitForBlockingPopupToClear();
+    await maybeShowResumeBanner();
     await notifyPageReady();
     observeUrlChanges();
     if (isTrainListPage(location.href)) {
-      await showReadyBadge();
-      await maybeGenerateTrainRecommendation();
+      await handleTrainListAutomation();
     }
     if (isPaymentPage(location.href)) {
       await showPaymentToast();
@@ -111,10 +151,16 @@
         lastHref = location.href;
         mountAssistantWidget();
         await loadWidgetState();
+        const loginOutcome = await maybeHandleAutoLogin();
+        if (loginOutcome?.navigating) {
+          return;
+        }
+        await waitForBlockingPopupToClear();
+        await maybeShowResumeBanner();
         await notifyPageReady();
         if (isTrainListPage(location.href)) {
-          await showReadyBadge();
-          await maybeGenerateTrainRecommendation();
+          contentState.trainListHandledForUrl = "";
+          await handleTrainListAutomation();
         }
         if (isPaymentPage(location.href)) {
           await showPaymentToast();
@@ -123,6 +169,94 @@
       }
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  function startAutoOkWatcher() {
+    if (contentState.autoOkWatcherStarted) {
+      return;
+    }
+
+    contentState.autoOkWatcherStarted = true;
+    const observer = new MutationObserver(() => {
+      maybeClickBlockingOkButton().catch(() => undefined);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    maybeClickBlockingOkButton().catch(() => undefined);
+  }
+
+  async function maybeClickBlockingOkButton() {
+    const POPUP_PHRASES = [
+      "you are booking in",
+      "foreign tourist quota",
+      "only aadhaar verified users can book tatkal train tickets",
+      "confirmation"
+    ];
+
+    // Walk up from the body looking for any visible container that holds known popup text.
+    const popupContainer = Array.from(
+      document.querySelectorAll("[role='dialog'], .ui-dialog, .modal, .ng-trigger, .ui-confirmdialog, p-dialog, p-confirmdialog")
+    ).find((element) => {
+      if (!isVisible(element)) {
+        return false;
+      }
+      const text = normalizeText(element.textContent || "");
+      return POPUP_PHRASES.some((phrase) => text.includes(phrase));
+    });
+
+    // Fallback: scan the whole document body for any visible block-level element with popup text.
+    const searchRoot = popupContainer || document.body;
+    const bodyText = normalizeText(searchRoot?.textContent || "");
+    const isPopupContext = POPUP_PHRASES.some((phrase) => bodyText.includes(phrase));
+
+    if (!isPopupContext) {
+      return false;
+    }
+
+    const buttons = Array.from((popupContainer || document).querySelectorAll("button, input[type='button'], input[type='submit']"))
+      .filter((element) => isVisible(element))
+      .filter((element) => {
+        const label = normalizeText(element.textContent || element.value || "");
+        return label === "ok" || label === "okay";
+      })
+      .filter((element) => !String(element.id || "").startsWith("irctc-"));
+
+    for (const button of buttons) {
+      button.click();
+      showStatusToast("Confirmation popup closed automatically", "info");
+      await humanDelay(180, 280);
+      return true;
+    }
+
+    return false;
+  }
+
+  async function waitForBlockingPopupToClear() {
+    const timeoutAt = Date.now() + 12000;
+    while (Date.now() < timeoutAt) {
+      const clicked = await maybeClickBlockingOkButton();
+      if (!hasBlockingConfirmationPopup()) {
+        return true;
+      }
+      if (clicked) {
+        await humanDelay(220, 340);
+      } else {
+        await sleep(220);
+      }
+    }
+    return !hasBlockingConfirmationPopup();
+  }
+
+  function hasBlockingConfirmationPopup() {
+    return Array.from(document.querySelectorAll("[role='dialog'], .ui-dialog, .modal, .ng-trigger, .ui-confirmdialog, div"))
+      .some((element) => {
+        if (!isVisible(element)) {
+          return false;
+        }
+        const text = normalizeText(element.textContent || "");
+        const isForeignTouristPopup = text.includes("you are booking in") && text.includes("foreign tourist quota");
+        const isTatkalAadhaarPopup = text.includes("only aadhaar verified users can book tatkal train tickets");
+        return isForeignTouristPopup || isTatkalAadhaarPopup;
+      });
   }
 
   async function handleMessage(message) {
@@ -135,9 +269,10 @@
       case "RUN_PAX_AUTOMATION":
         return runPassengerAutomation(message.journeyConfig);
       case "SHOW_READY_BADGE":
-        await showReadyBadge();
-        await maybeGenerateTrainRecommendation(message.journeyConfig);
+        await handleTrainListAutomation(message.journeyConfig);
         return {};
+      case "RESUME_BOOKING_FLOW":
+        return resumeBookingFlow(message.checkpoint || null);
       case "SCRAPE_AVAILABILITY_RESULTS":
         return scrapeAvailabilityAndSend(message.journeyConfig);
       case "SHOW_PAYMENT_TOAST":
@@ -159,6 +294,7 @@
 
   async function runSearchAutomation(journeyConfig, isAvailabilityMode) {
     contentState.activeConfig = journeyConfig;
+    await waitForBlockingPopupToClear();
     await updateStatus("active", isAvailabilityMode ? "Checking availability on IRCTC..." : "Filling journey search form...", [
       { label: "Waiting for search form", state: "active" }
     ]);
@@ -191,6 +327,7 @@
 
     await humanDelay(140, 260);
     searchButton.click();
+    await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
     return { submitted: true };
   }
 
@@ -241,7 +378,27 @@
       Quota: SELECTORS.quotaDropdown
     };
 
-    const dropdown = await findElement(`${purpose} dropdown`, fallbackMap[purpose] || []);
+    let dropdown;
+    try {
+      dropdown = await findElement(`${purpose} dropdown`, fallbackMap[purpose] || []);
+    } catch (error) {
+      if (purpose === "Quota") {
+        // Quota dropdown not found — already at correct value or not on this page layout.
+        showStatusToast(`Quota field not found — please verify "${value}" is set manually.`, "info");
+        return;
+      }
+      throw error;
+    }
+
+    // For quota: read the currently displayed value first.
+    // If it already matches what we want, skip clicking entirely.
+    if (purpose === "Quota") {
+      const currentText = getDropdownDisplayedText(dropdown);
+      if (matchesDropdownValue(currentText, value)) {
+        return; // Already correct, nothing to do.
+      }
+    }
+
     await clickAngularDropdown(dropdown, value, purpose);
   }
 
@@ -266,6 +423,17 @@
         return;
       }
 
+      if (purpose === "Quota") {
+        // Close the open dropdown panel before warning.
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        const panel = document.querySelector(".p-dropdown-panel, .ui-dropdown-panel");
+        if (panel) {
+          panel.style.display = "none";
+        }
+        showStatusToast(`Quota "${value}" not found — please set it manually.`, "error");
+        return;
+      }
+
       throw await createUserVisibleError(`Could not select ${purpose}: "${value}".`);
     }
     option.click();
@@ -273,11 +441,12 @@
   }
 
   async function waitForDropdownOption(value) {
-    const target = normalizeText(value);
     const timeoutAt = Date.now() + 6000;
     while (Date.now() < timeoutAt) {
-      const candidates = Array.from(document.querySelectorAll(".p-dropdown-item, .ui-dropdown-item, li[role='option'], span"))
-        .filter((node) => matchesDropdownValue(node.textContent, value));
+      // Intentionally exclude bare 'span' to avoid false matches from nested text
+      // inside wrong dropdown items (e.g. "Foreign Tourist" containing "General" as a substring).
+      const candidates = Array.from(document.querySelectorAll(".p-dropdown-item, .ui-dropdown-item, li[role='option']"))
+        .filter((node) => isVisible(node) && matchesDropdownValue(node.textContent, value));
       if (candidates.length) {
         return candidates[0];
       }
@@ -316,19 +485,25 @@
       "2a": ["ac 2 tier", "ac 2 tier (2a)", "second ac", "2 tier"],
       "1a": ["ac first class", "ac first class (1a)", "first ac"],
       "sl": ["sleeper", "sleeper (sl)"],
-      "general": ["general", "gn"],
-      "tatkal": ["tatkal", "tk"],
-      "premium tatkal": ["premium tatkal", "pt"],
-      "ladies": ["ladies", "ld"],
-      "senior citizen": ["senior citizen", "ss"]
+      // Quota aliases — IRCTC shows short codes like GN, TQ, PT, LD, SS in dropdowns
+      "general": ["general", "gn", "general quota"],
+      "tatkal": ["tatkal", "tq", "tk", "tatkal quota"],
+      "premium tatkal": ["premium tatkal", "pt", "premium tatkal quota"],
+      "ladies": ["ladies", "ld", "ladies quota"],
+      "senior citizen": ["senior citizen", "ss", "senior citizen quota"]
     };
 
     const aliases = aliasMap[requested] || [];
-    return aliases.some((alias) => candidate.includes(alias));
+    // For quota items, do a strict full-text check first to avoid "General" matching inside "Foreign Tourist"
+    if (candidate === requested) {
+      return true;
+    }
+    return aliases.some((alias) => candidate === alias || candidate.startsWith(alias + " ") || candidate.endsWith(" " + alias) || candidate === alias);
   }
 
   async function runPassengerAutomation(journeyConfig) {
     contentState.activeConfig = journeyConfig;
+    await waitForBlockingPopupToClear();
     await updateStatus("active", "Passenger details page detected. Filling passengers...", [
       { label: "Waiting for passenger details page", state: "complete" },
       { label: "Filling passenger cards", state: "active" }
@@ -366,6 +541,7 @@
 
     const continueButton = await findContinueButton();
     continueButton.click();
+    await saveCheckpoint("STEP_COMPLETED_PAX", journeyConfig);
     await updateStatus("active", "Continuing to payment handoff...", [
       { label: "Passenger details filled", state: "complete" },
       { label: "User confirmed details", state: "complete" },
@@ -554,6 +730,31 @@
     return results;
   }
 
+  async function handleTrainListAutomation(journeyConfig = null) {
+    if (!isTrainListPage(location.href)) {
+      return {};
+    }
+
+    await waitForBlockingPopupToClear();
+    const activeJourney = await getResolvedJourneyConfig(journeyConfig);
+    const autoSelectTrain = Boolean(activeJourney?.autoSelectTrain || activeJourney?.metadata?.autoSelectTrain);
+    await saveCheckpoint("STEP_WAITING_TRAIN_SELECT", activeJourney);
+
+    if (!autoSelectTrain) {
+      await showReadyBadge();
+      await maybeGenerateTrainRecommendation(activeJourney);
+      return {};
+    }
+
+    if (contentState.trainListHandledForUrl === location.href) {
+      return {};
+    }
+
+    contentState.trainListHandledForUrl = location.href;
+    await autoSelectBestTrain(activeJourney);
+    return {};
+  }
+
   async function maybeGenerateTrainRecommendation(journeyConfig = null) {
     try {
       await waitForTrainCards();
@@ -603,6 +804,8 @@
   }
 
   async function reportBookingCompleted() {
+    const journeyConfig = await getResolvedJourneyConfig(contentState.activeConfig);
+    await saveCheckpoint("STEP_COMPLETED_PAYMENT", journeyConfig);
     const trainName = document.querySelector(".train-heading, .train-name, h5")?.textContent?.trim() || "";
     await safeSendRuntimeMessage({
       type: "BOOKING_COMPLETED",
@@ -613,6 +816,527 @@
   async function getActiveJourneyFromStorage() {
     const { [STORAGE_KEYS.ACTIVE_BOOKING]: activeBooking } = await getStorage([STORAGE_KEYS.ACTIVE_BOOKING]);
     return activeBooking?.journeyConfig || null;
+  }
+
+  async function getResolvedJourneyConfig(journeyConfig = null) {
+    if (journeyConfig?.autoSelectTrain || journeyConfig?.metadata?.autoSelectTrain) {
+      return journeyConfig;
+    }
+
+    const activeJourney = journeyConfig || (await getActiveJourneyFromStorage()) || {};
+    const { [STORAGE_KEYS.JOURNEY_DRAFT]: journeyDraft } = await getStorage([STORAGE_KEYS.JOURNEY_DRAFT]);
+
+    if (!journeyDraft) {
+      return activeJourney;
+    }
+
+    return {
+      ...journeyDraft,
+      ...activeJourney,
+      metadata: {
+        ...(journeyDraft.metadata || {}),
+        ...(activeJourney.metadata || {})
+      }
+    };
+  }
+
+  async function maybeHandleAutoLogin() {
+    const currentPage = getCurrentPage();
+    if (!["HOME", "LOGIN"].includes(currentPage) || contentState.autoLoginInFlight) {
+      return { attempted: false, navigating: false };
+    }
+
+    const {
+      [STORAGE_KEYS.LOGIN_CREDS]: loginCreds,
+      [STORAGE_KEYS.AUTO_LOGIN]: autoLoginEnabled
+    } = await getStorage([STORAGE_KEYS.LOGIN_CREDS, STORAGE_KEYS.AUTO_LOGIN]);
+
+    if (!autoLoginEnabled || !loginCreds?.ircLogin || !loginCreds?.ircPass) {
+      return { attempted: false, navigating: false };
+    }
+
+    if (isLoggedIn()) {
+      await saveLoginCheckpointIfNeeded();
+      return await maybeContinueArmedBookingAfterLogin();
+    }
+
+    contentState.autoLoginInFlight = true;
+    try {
+      const username = decodeCredential(loginCreds.ircLogin);
+      const password = decodeCredential(loginCreds.ircPass);
+      if (!username || !password) {
+        return { attempted: false, navigating: false };
+      }
+
+      const loggedIn = await autoLogin(username, password);
+      if (loggedIn) {
+        await saveLoginCheckpointIfNeeded();
+        return await maybeContinueArmedBookingAfterLogin();
+      }
+      return { attempted: true, navigating: false };
+    } finally {
+      contentState.autoLoginInFlight = false;
+    }
+  }
+
+  async function autoLogin(username, password) {
+    showStatusToast("Opening IRCTC login...", "info");
+    const loginButton = await findLoginButton();
+    if (!loginButton) {
+      throw await createUserVisibleError("Could not find the IRCTC login button.");
+    }
+
+    loginButton.click();
+    await humanDelay(280, 420);
+
+    const userInput = await findElement("IRCTC login user ID", SELECTORS.loginUserId);
+    const passwordInput = await findElement("IRCTC login password", SELECTORS.loginPassword);
+    await clearAndType(userInput, username);
+    await humanDelay();
+    await clearAndType(passwordInput, password);
+    await humanDelay();
+
+    const submitButton = await findLoginSubmitButton();
+    if (!submitButton) {
+      throw await createUserVisibleError("Could not find the IRCTC login submit button.");
+    }
+
+    submitButton.click();
+    await humanDelay(300, 450);
+
+    const success = await waitForLoginSuccess(username);
+    if (!success) {
+      showStatusToast("❌ Login failed — please login manually", "error");
+      return false;
+    }
+
+    showStatusToast("✅ Logged in successfully", "success");
+    return true;
+  }
+
+  async function findLoginButton() {
+    for (const selector of SELECTORS.loginNav) {
+      const element = document.querySelector(selector);
+      if (element && isVisible(element)) {
+        return element;
+      }
+    }
+
+    const textMatch = Array.from(document.querySelectorAll("a, button, [role='button']"))
+      .find((element) => isVisible(element) && /login|login\s*\/\s*register/i.test(normalizeText(element.textContent)));
+    if (textMatch) {
+      return textMatch;
+    }
+
+    return findWithGeminiFallback("IRCTC login button", SELECTORS.loginNav);
+  }
+
+  async function findLoginSubmitButton() {
+    for (const selector of ["button#login", "button[type='submit']", ".loginModal button.search_btn"]) {
+      const element = document.querySelector(selector);
+      if (element && isVisible(element)) {
+        return element;
+      }
+    }
+
+    const textMatch = Array.from(document.querySelectorAll("button, [role='button']"))
+      .find((element) => isVisible(element) && /sign in|login/i.test(normalizeText(element.textContent)));
+    if (textMatch) {
+      return textMatch;
+    }
+
+    return findWithGeminiFallback("IRCTC login submit button", ["button#login", "button[type='submit']", ".loginModal button.search_btn"]);
+  }
+
+  async function waitForLoginSuccess(username) {
+    const timeoutAt = Date.now() + 15000;
+    while (Date.now() < timeoutAt) {
+      if (isLoggedIn(username)) {
+        return true;
+      }
+      if (hasLoginErrorVisible()) {
+        return false;
+      }
+      await sleep(250);
+    }
+    return isLoggedIn(username);
+  }
+
+  function isLoggedIn(username = "") {
+    const markerFound = SELECTORS.loggedInMarkers.some((selector) => {
+      const element = document.querySelector(selector);
+      return element && isVisible(element);
+    });
+    if (markerFound) {
+      return true;
+    }
+
+    const pageText = normalizeText(document.body?.textContent || "");
+    return pageText.includes("my account") || pageText.includes("welcome") || (username && pageText.includes(normalizeText(username)));
+  }
+
+  function hasLoginErrorVisible() {
+    return Array.from(document.querySelectorAll(".ui-message-error, .error, .loginError, [role='alert'], .toast-message"))
+      .some((element) => isVisible(element) && /invalid|incorrect|failed|captcha|error/i.test(normalizeText(element.textContent)));
+  }
+
+  async function saveLoginCheckpointIfNeeded() {
+    const { [STORAGE_KEYS.ACTIVE_BOOKING]: activeBooking } = await getStorage([STORAGE_KEYS.ACTIVE_BOOKING]);
+    const journeyConfig = activeBooking?.journeyConfig || null;
+    if (journeyConfig?.fromStation && journeyConfig?.toStation) {
+      await saveCheckpoint("STEP_COMPLETED_LOGIN", journeyConfig);
+    }
+  }
+
+  async function maybeContinueArmedBookingAfterLogin() {
+    const { [STORAGE_KEYS.ACTIVE_BOOKING]: activeBooking } = await getStorage([STORAGE_KEYS.ACTIVE_BOOKING]);
+    if (!activeBooking?.journeyConfig) {
+      return { attempted: true, navigating: false };
+    }
+    if (["HOME", "LOGIN"].includes(getCurrentPage())) {
+      location.assign(IRCTC_URLS.SEARCH);
+      return { attempted: true, navigating: true };
+    }
+    return { attempted: true, navigating: false };
+  }
+
+  async function saveCheckpoint(step, journeyConfig) {
+    if (!journeyConfig?.fromStation || !journeyConfig?.toStation) {
+      return;
+    }
+
+    await setStorage({
+      [STORAGE_KEYS.BOOKING_CHECKPOINT]: {
+        step,
+        journeyConfig,
+        timestamp: new Date().toISOString(),
+        pageUrl: location.href
+      }
+    });
+
+    if (step === "STEP_COMPLETED_PAYMENT") {
+      setTimeout(() => {
+        setStorage({ [STORAGE_KEYS.BOOKING_CHECKPOINT]: null });
+      }, 60000);
+    }
+  }
+
+  async function getValidCheckpoint() {
+    const { [STORAGE_KEYS.BOOKING_CHECKPOINT]: checkpoint } = await getStorage([STORAGE_KEYS.BOOKING_CHECKPOINT]);
+    if (!checkpoint?.timestamp) {
+      return null;
+    }
+
+    if (Date.now() - new Date(checkpoint.timestamp).getTime() > CHECKPOINT_MAX_AGE_MS) {
+      await clearCheckpoint();
+      return null;
+    }
+
+    return checkpoint;
+  }
+
+  async function clearCheckpoint() {
+    await setStorage({ [STORAGE_KEYS.BOOKING_CHECKPOINT]: null });
+  }
+
+  async function maybeShowResumeBanner() {
+    const checkpoint = await getValidCheckpoint();
+    const existing = document.getElementById("irctc-autofill-resume-banner");
+
+    if (!checkpoint) {
+      existing?.remove();
+      contentState.resumeBannerVisible = false;
+      return;
+    }
+
+    if (existing || contentState.resumeBannerVisible) {
+      return;
+    }
+
+    const banner = document.createElement("div");
+    banner.id = "irctc-autofill-resume-banner";
+    banner.style.cssText = [
+      "position:fixed",
+      "top:0",
+      "left:0",
+      "right:0",
+      "z-index:9999998",
+      "background:#1A237E",
+      "color:#fff",
+      "font:14px/1.45 'Segoe UI',sans-serif",
+      "padding:12px 16px",
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:12px",
+      "box-shadow:0 10px 28px rgba(20,35,90,0.24)",
+      "transform:translateY(-100%)",
+      "transition:transform 180ms ease"
+    ].join(";");
+
+    banner.innerHTML = `
+      <div>🔄 Interrupted booking detected — ${escapeHtml(checkpoint.journeyConfig.fromStation)} → ${escapeHtml(checkpoint.journeyConfig.toStation)} on ${escapeHtml(checkpoint.journeyConfig.journeyDate)} | Last step: ${escapeHtml(getCheckpointStepLabel(checkpoint.step))}</div>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button id="irctc-resume-continue" type="button" style="border:0;border-radius:10px;padding:9px 12px;background:#FF6D00;color:#fff;font-weight:700;cursor:pointer;">▶ Continue</button>
+        <button id="irctc-resume-dismiss" type="button" style="border:1px solid rgba(255,255,255,0.55);border-radius:10px;padding:9px 12px;background:transparent;color:#fff;font-weight:700;cursor:pointer;">✕ Dismiss</button>
+      </div>
+    `;
+
+    document.body.appendChild(banner);
+    requestAnimationFrame(() => {
+      banner.style.transform = "translateY(0)";
+    });
+
+    banner.querySelector("#irctc-resume-continue").addEventListener("click", async () => {
+      await resumeBookingFlow(checkpoint);
+    });
+    banner.querySelector("#irctc-resume-dismiss").addEventListener("click", async () => {
+      await clearCheckpoint();
+      banner.remove();
+      contentState.resumeBannerVisible = false;
+    });
+
+    contentState.resumeBannerVisible = true;
+  }
+
+  async function resumeBookingFlow(checkpoint = null) {
+    const activeCheckpoint = checkpoint || (await getValidCheckpoint());
+    if (!activeCheckpoint?.journeyConfig) {
+      showStatusToast("No recent booking checkpoint was found.", "error");
+      return { resumed: false };
+    }
+
+    const journeyConfig = activeCheckpoint.journeyConfig;
+    contentState.activeConfig = journeyConfig;
+    await setStorage({
+      [STORAGE_KEYS.ACTIVE_BOOKING]: {
+        mode: "booking",
+        journeyConfig,
+        sourceTabId: null,
+        triggeredBy: "resume",
+        lastUpdatedAt: new Date().toISOString()
+      }
+    });
+
+    await waitForBlockingPopupToClear();
+    const currentPage = getCurrentPage();
+
+    switch (activeCheckpoint.step) {
+      case "STEP_COMPLETED_LOGIN":
+        if (currentPage === "SEARCH") {
+          return runSearchAutomation(journeyConfig, false);
+        }
+        location.assign(IRCTC_URLS.SEARCH);
+        return { navigating: true };
+      case "STEP_COMPLETED_SEARCH":
+      case "STEP_WAITING_TRAIN_SELECT":
+        if (currentPage === "TRAIN_LIST") {
+          return handleTrainListAutomation(journeyConfig);
+        }
+        if (currentPage === "SEARCH") {
+          showStatusToast("Resuming from search to reach train list again...", "info");
+          return runSearchAutomation(journeyConfig, false);
+        }
+        location.assign(IRCTC_URLS.SEARCH);
+        return { navigating: true };
+      case "STEP_COMPLETED_TRAIN_SELECT":
+        if (currentPage === "PAX") {
+          return runPassengerAutomation(journeyConfig);
+        }
+        if (currentPage === "TRAIN_LIST") {
+          showStatusToast("Re-selecting your train to continue...", "info");
+          return handleTrainListAutomation(journeyConfig);
+        }
+        if (currentPage === "SEARCH") {
+          showStatusToast("Returning to search so train selection can be rebuilt...", "info");
+          return runSearchAutomation(journeyConfig, false);
+        }
+        location.assign(IRCTC_URLS.SEARCH);
+        return { navigating: true };
+      case "STEP_COMPLETED_PAX":
+        if (currentPage === "PAYMENT") {
+          showStatusToast("You are at payment page — please complete payment.", "info");
+          return { resumed: true };
+        }
+        if (currentPage === "PAX") {
+          return runPassengerAutomation(journeyConfig);
+        }
+        if (currentPage === "TRAIN_LIST") {
+          showStatusToast("Rebuilding booking flow from train selection...", "info");
+          return handleTrainListAutomation(journeyConfig);
+        }
+        if (currentPage === "SEARCH") {
+          showStatusToast("Rebuilding booking flow from search...", "info");
+          return runSearchAutomation(journeyConfig, false);
+        }
+        location.assign(IRCTC_URLS.SEARCH);
+        return { navigating: true };
+      case "STEP_COMPLETED_PAYMENT":
+        showStatusToast("Booking already reached payment. Please complete payment.", "info");
+        return { resumed: currentPage === "PAYMENT" };
+      default:
+        return { resumed: false };
+    }
+  }
+
+  function getCheckpointStepLabel(step) {
+    return CHECKPOINT_STEP_LABELS[step] || "In progress";
+  }
+
+  function decodeCredential(value) {
+    if (!value) {
+      return "";
+    }
+    try {
+      return atob(value);
+    } catch (error) {
+      return "";
+    }
+  }
+
+  async function autoSelectBestTrain(journeyConfig = {}) {
+    try {
+      await showReadyBadge("Auto-selecting the best train...");
+      showStatusToast("Waiting for train list to load...", "info");
+      await waitForTrainCards();
+      await humanDelay();
+
+      showStatusToast("Scanning visible trains...", "info");
+      const trains = parseTrainCards();
+      const best = scoreTrainRecommendation(trains, journeyConfig.journeyClass || "3A");
+      if (!best?.train?.trainNumber) {
+        throw await createUserVisibleError("Could not identify the best train from the visible list.");
+      }
+
+      await maybeGenerateTrainRecommendation(journeyConfig);
+
+      const card = findTrainCardByNumber(best.train.trainNumber);
+      if (!card) {
+        throw await createUserVisibleError(`Could not find the recommended train card for ${best.train.trainNumber}.`);
+      }
+
+      await updateStatus("active", `Best train found: ${best.train.trainName} (${best.train.trainNumber}). Opening ${journeyConfig.journeyClass || "selected"} class...`, [
+        { label: "Train list loaded", state: "complete" },
+        { label: `Recommended ${best.train.trainNumber}`, state: "complete" },
+        { label: `Opening ${journeyConfig.journeyClass || "class"} availability`, state: "active" }
+      ]);
+      showStatusToast(`Best train found: ${best.train.trainName} (${best.train.trainNumber})`, "success");
+
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      await humanDelay(180, 320);
+
+      const classButton = await findClassButtonInCard(card, journeyConfig.journeyClass || "3A");
+      if (!classButton) {
+        throw await createUserVisibleError(`Could not find the ${journeyConfig.journeyClass || "selected"} class button for train ${best.train.trainNumber}.`, card);
+      }
+
+      classButton.click();
+      await humanDelay(220, 360);
+      showStatusToast(`Opened ${journeyConfig.journeyClass || "selected"} class for ${best.train.trainNumber}`, "info");
+
+      await updateStatus("active", `Looking for Book Now on ${best.train.trainNumber}...`, [
+        { label: "Train list loaded", state: "complete" },
+        { label: `Opened ${journeyConfig.journeyClass || "class"} for ${best.train.trainNumber}`, state: "complete" },
+        { label: "Waiting for Book Now button", state: "active" }
+      ]);
+
+      const bookNowButton = await findBookNowButtonInCard(card, best.train);
+      if (!bookNowButton) {
+        throw await createUserVisibleError(`Could not find Book Now for train ${best.train.trainNumber}.`, card);
+      }
+
+      showStatusToast(`Book Now found for ${best.train.trainNumber}. Booking...`, "success");
+      bookNowButton.click();
+      await saveCheckpoint("STEP_COMPLETED_TRAIN_SELECT", journeyConfig);
+      await humanDelay(200, 340);
+
+      await updateStatus("active", `Book Now clicked for ${best.train.trainName}. Moving to passenger details...`, [
+        { label: "Train list loaded", state: "complete" },
+        { label: `Selected ${best.train.trainNumber}`, state: "complete" },
+        { label: "Book Now clicked", state: "complete" }
+      ]);
+      await showReadyBadge(`Best train selected automatically: ${best.train.trainNumber}`);
+    } catch (error) {
+      contentState.trainListHandledForUrl = "";
+      throw error;
+    }
+  }
+
+  function findTrainCardByNumber(trainNumber) {
+    if (!trainNumber) {
+      return null;
+    }
+    const cards = Array.from(document.querySelectorAll("app-train-list, .train-avl-enq-box, .train-list .train-row, .tbis-div"));
+    return cards.find((card) => normalizeText(card.textContent).includes(normalizeText(trainNumber))) || null;
+  }
+
+  async function findClassButtonInCard(card, journeyClass) {
+    const normalizedClass = normalizeText(journeyClass);
+    const aliases = getClassAliases(normalizedClass);
+    const timeoutAt = Date.now() + 8000;
+
+    while (Date.now() < timeoutAt) {
+      const candidates = Array.from(card.querySelectorAll("button, [role='button'], .btnDefault, .pre-avl, span, a"))
+        .filter((element) => isVisible(element))
+        .filter((element) => {
+          const text = normalizeText(element.textContent || element.getAttribute("aria-label") || element.getAttribute("title") || "");
+          return aliases.some((alias) => text === alias || text.includes(alias));
+        });
+
+      if (candidates.length) {
+        return candidates[0];
+      }
+      await sleep(200);
+    }
+    return null;
+  }
+
+  function getClassAliases(journeyClass) {
+    const aliasMap = {
+      sl: ["sl", "sleeper"],
+      "3a": ["3a", "ac 3 tier", "third ac"],
+      "2a": ["2a", "ac 2 tier", "second ac"],
+      "1a": ["1a", "ac first class", "first ac"]
+    };
+    return aliasMap[journeyClass] || [journeyClass];
+  }
+
+  async function findBookNowButtonInCard(card, train) {
+    const timeoutAt = Date.now() + 10000;
+
+    while (Date.now() < timeoutAt) {
+      const primary = Array.from(card.querySelectorAll("button.btnDefault"))
+        .find((element) => isVisible(element) && /book now/i.test(element.textContent || ""));
+      if (primary) {
+        return primary;
+      }
+
+      const textMatch = Array.from(card.querySelectorAll("button, [role='button']"))
+        .find((element) => isVisible(element) && /book now/i.test(element.textContent || ""));
+      if (textMatch) {
+        return textMatch;
+      }
+
+      const submit = Array.from(card.querySelectorAll("input[type='submit']"))
+        .find((element) => isVisible(element) && /book/i.test(element.value || ""));
+      if (submit) {
+        return submit;
+      }
+
+      await sleep(220);
+    }
+
+    const geminiRecovered = await findWithGeminiFallback(`Book Now button for train ${train?.trainNumber || ""}`, [
+      "button.btnDefault",
+      "button",
+      "input[type='submit'][value*='Book']"
+    ]);
+
+    if (geminiRecovered && (card.contains(geminiRecovered) || findTrainCardByNumber(train?.trainNumber) === geminiRecovered.closest("app-train-list, .train-avl-enq-box, .train-list .train-row, .tbis-div"))) {
+      return geminiRecovered;
+    }
+
+    return null;
   }
 
   async function waitForTrainCards() {
@@ -781,6 +1505,44 @@
   function isVisible(element) {
     const style = window.getComputedStyle(element);
     return style.visibility !== "hidden" && style.display !== "none";
+  }
+
+  function showStatusToast(message, type = "info") {
+    let toast = document.getElementById("irctc-autofill-status-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "irctc-autofill-status-toast";
+      toast.style.cssText = [
+        "position:fixed",
+        "right:18px",
+        "bottom:28px",
+        "z-index:2147483646",
+        "max-width:320px",
+        "padding:12px 14px",
+        "border-radius:14px",
+        "color:#ffffff",
+        "font:700 12px/1.4 'Segoe UI',sans-serif",
+        "box-shadow:0 16px 38px rgba(20,35,90,0.22)",
+        "transition:opacity 180ms ease"
+      ].join(";");
+      document.body.appendChild(toast);
+    }
+
+    const palette = {
+      info: "#1a73e8",
+      success: "#1f9d57",
+      error: "#d62839"
+    };
+
+    toast.style.background = palette[type] || palette.info;
+    toast.textContent = message;
+    toast.style.opacity = "1";
+    clearTimeout(showStatusToast.timeoutId);
+    showStatusToast.timeoutId = setTimeout(() => {
+      if (toast) {
+        toast.style.opacity = "0";
+      }
+    }, 2600);
   }
 
   function mountAssistantWidget() {
@@ -1144,6 +1906,7 @@
       tatkalRushMode: Boolean(journeyDraft.tatkalRushMode)
     };
 
+    await clearCheckpoint();
     await safeSendRuntimeMessage({ type: "SAVE_JOURNEY_DRAFT", payload });
     const response = await safeSendRuntimeMessage({
       type: "START_BOOKING_FLOW",
@@ -1314,5 +2077,24 @@
 
   function isPaymentPage(url = "") {
     return String(url).includes("/payment");
+  }
+
+  function getCurrentPage(url = location.href) {
+    if (isSearchPage(url)) {
+      return "SEARCH";
+    }
+    if (isTrainListPage(url)) {
+      return "TRAIN_LIST";
+    }
+    if (isPaxDetailsPage(url)) {
+      return "PAX";
+    }
+    if (isPaymentPage(url)) {
+      return "PAYMENT";
+    }
+    if (/login|user-registration/i.test(String(url))) {
+      return "LOGIN";
+    }
+    return "HOME";
   }
 })();

@@ -19,7 +19,9 @@
     groups: [],
     defaultPreferences: { ...DEFAULT_PREFERENCES },
     geminiApiKey: "",
-    quickWidgetSettings: { ...DEFAULT_QUICK_WIDGET_SETTINGS }
+    quickWidgetSettings: { ...DEFAULT_QUICK_WIDGET_SETTINGS },
+    loginCreds: null,
+    autoLogin: false
   };
 
   const elements = {};
@@ -64,6 +66,10 @@
       "defaultReservationChoice",
       "fallbackMobile",
       "geminiApiKey",
+      "loginUsername",
+      "loginPassword",
+      "autoLogin",
+      "saveCredentialsButton",
       "favoriteFromStation",
       "favoriteToStation",
       "favoriteGroupId",
@@ -81,6 +87,7 @@
     elements.groupForm.addEventListener("submit", saveGroup);
     elements.resetGroupButton.addEventListener("click", resetGroupForm);
     elements.preferencesForm.addEventListener("submit", savePreferences);
+    elements.saveCredentialsButton.addEventListener("click", saveCredentials);
   }
 
   async function loadState() {
@@ -89,6 +96,8 @@
     state.groups = data.groups;
     state.defaultPreferences = data.defaultPreferences;
     state.geminiApiKey = data.geminiApiKey || "";
+    state.loginCreds = data.loginCreds || null;
+    state.autoLogin = Boolean(data.autoLogin);
     state.quickWidgetSettings = data.quickWidgetSettings || { ...DEFAULT_QUICK_WIDGET_SETTINGS };
     applyPreferences();
     renderProfiles();
@@ -106,6 +115,9 @@
     elements.defaultReservationChoice.value = state.defaultPreferences.reservationChoice || "";
     elements.fallbackMobile.value = state.defaultPreferences.fallbackMobile || "";
     elements.geminiApiKey.value = state.geminiApiKey;
+    elements.loginUsername.value = safeDecodeCredential(state.loginCreds?.ircLogin);
+    elements.loginPassword.value = safeDecodeCredential(state.loginCreds?.ircPass);
+    elements.autoLogin.checked = state.autoLogin;
     elements.favoriteFromStation.value = state.quickWidgetSettings.favoriteFromStation || "";
     elements.favoriteToStation.value = state.quickWidgetSettings.favoriteToStation || "";
     elements.selectionMode.value = state.quickWidgetSettings.selectionMode || "family";
@@ -221,6 +233,22 @@
       )
     });
     showToast("Preferences saved locally.");
+  }
+
+  async function saveCredentials() {
+    const username = elements.loginUsername.value.trim();
+    const password = elements.loginPassword.value;
+    state.loginCreds = username || password ? {
+      ircLogin: username ? btoa(username) : "",
+      ircPass: password ? btoa(password) : ""
+    } : null;
+    state.autoLogin = elements.autoLogin.checked;
+
+    await setStorage({
+      [STORAGE_KEYS.LOGIN_CREDS]: state.loginCreds,
+      [STORAGE_KEYS.AUTO_LOGIN]: state.autoLogin
+    });
+    showToast("Login credentials saved locally.");
   }
 
   function renderProfiles() {
@@ -396,6 +424,17 @@
     showToast._timer = setTimeout(() => {
       elements.toast.classList.add("hidden");
     }, 2500);
+  }
+
+  function safeDecodeCredential(value) {
+    if (!value) {
+      return "";
+    }
+    try {
+      return atob(value);
+    } catch (error) {
+      return "";
+    }
   }
 
   function escapeHtml(value) {
