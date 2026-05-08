@@ -1,7 +1,7 @@
 /* eslint-disable no-var */
 /* Removed IIFE wrapper for Chrome MV3 service worker importScripts compatibility */
 
-const STORAGE_KEYS = {
+var STORAGE_KEYS = {
     PASSENGERS: "passengers",
     GROUPS: "groups",
     SAVED_STATIONS: "savedStations",
@@ -22,7 +22,7 @@ const STORAGE_KEYS = {
     AUTO_LOGIN: "autoLogin"
   };
 
-  const DEFAULT_PREFERENCES = {
+  var DEFAULT_PREFERENCES = {
     travelInsurance: true,
     autoUpgrade: false,
     onlyConfirmBerths: false,
@@ -32,7 +32,7 @@ const STORAGE_KEYS = {
     fallbackMobile: ""
   };
 
-  const DEFAULT_QUICK_WIDGET_SETTINGS = {
+  var DEFAULT_QUICK_WIDGET_SETTINGS = {
     selectionMode: "family",
     favoriteFromStation: "",
     favoriteToStation: "",
@@ -40,7 +40,7 @@ const STORAGE_KEYS = {
     favoritePassengerId: ""
   };
 
-  const QUOTAS = [
+  var QUOTAS = [
     "General",
     "Tatkal",
     "Ladies",
@@ -48,11 +48,11 @@ const STORAGE_KEYS = {
     "Premium Tatkal"
   ];
 
-  const JOURNEY_CLASSES = ["SL", "3A", "2A", "1A", "All Classes"];
+  var JOURNEY_CLASSES = ["SL", "3A", "2A", "1A", "All Classes"];
 
-  const PAYMENT_MODES = ["BHIM UPI", "Credit & Debit Card", "Net Banking"];
+  var PAYMENT_MODES = ["BHIM UPI", "Credit & Debit Card", "Net Banking"];
 
-  const BERTH_PREFERENCES = [
+  var BERTH_PREFERENCES = [
     "Lower",
     "Middle",
     "Upper",
@@ -61,9 +61,9 @@ const STORAGE_KEYS = {
     "No Preference"
   ];
 
-  const GENDERS = ["Male", "Female", "Transgender"];
+  var GENDERS = ["Male", "Female", "Transgender"];
 
-  const ID_PROOF_TYPES = [
+  var ID_PROOF_TYPES = [
     "Aadhaar",
     "PAN",
     "Passport",
@@ -71,9 +71,9 @@ const STORAGE_KEYS = {
     "Voter ID"
   ];
 
-  const NATIONALITY_DEFAULT = "India";
+  var NATIONALITY_DEFAULT = "India";
 
-  const IRCTC_URLS = {
+  var IRCTC_URLS = {
     SEARCH: "https://www.irctc.co.in/nget/train-search",
     TRAIN_LIST: "https://www.irctc.co.in/nget/train-list",
     PAX_DETAILS: "https://www.irctc.co.in/nget/booking/pax-details",
