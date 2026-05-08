@@ -2576,12 +2576,14 @@
   }
 
   function mountAssistantWidget() {
-    if (document.getElementById("irctc-autofill-widget")) {
+    let widget = document.getElementById("irctc-autofill-widget");
+    if (widget) {
       updateWidgetStatus("ready", widgetMessageForPage());
+      attachWidgetListeners(widget);
       return;
     }
 
-    const widget = document.createElement("div");
+    widget = document.createElement("div");
     widget.id = "irctc-autofill-widget";
     widget.innerHTML = `
       <div class="irctc-autofill-card">
@@ -2744,18 +2746,25 @@
 
     document.documentElement.appendChild(style);
     document.body.appendChild(widget);
+    attachWidgetListeners(widget);
+    contentState.widgetMounted = true;
+  }
 
-    widget.querySelector("#irctc-autofill-minimize").addEventListener("click", () => {
+  let widgetListenersAttached = false;
+  function attachWidgetListeners(widget) {
+    if (widgetListenersAttached) return;
+    widgetListenersAttached = true;
+
+    widget.querySelector("#irctc-autofill-minimize")?.addEventListener("click", () => {
       widget.classList.toggle("minimized");
     });
-    widget.querySelector("#irctc-autofill-open-options").addEventListener("click", async () => {
+    widget.querySelector("#irctc-autofill-open-options")?.addEventListener("click", async () => {
       await safeSendRuntimeMessage({ type: "OPEN_OPTIONS" });
     });
-    widget.querySelector("#irctc-widget-save").addEventListener("click", saveWidgetPreferences);
-    widget.querySelector("#irctc-widget-start").addEventListener("click", startWidgetBooking);
-    widget.querySelector("#irctc-widget-family-btn").addEventListener("click", () => setWidgetMode("family"));
-    widget.querySelector("#irctc-widget-single-btn").addEventListener("click", () => setWidgetMode("single"));
-    contentState.widgetMounted = true;
+    widget.querySelector("#irctc-widget-save")?.addEventListener("click", saveWidgetPreferences);
+    widget.querySelector("#irctc-widget-start")?.addEventListener("click", startWidgetBooking);
+    widget.querySelector("#irctc-widget-family-btn")?.addEventListener("click", () => setWidgetMode("family"));
+    widget.querySelector("#irctc-widget-single-btn")?.addEventListener("click", () => setWidgetMode("single"));
   }
 
   async function loadWidgetState() {

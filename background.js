@@ -189,7 +189,12 @@ async function handleMessage(message, sender) {
     case "SHOW_NOTIFICATION":
       return showNotification(message.payload);
     case "OPEN_OPTIONS":
-      await chrome.runtime.openOptionsPage();
+      try {
+        await chrome.runtime.openOptionsPage();
+      } catch (error) {
+        // Fallback for cases where openOptionsPage might not be available or fails
+        await chrome.tabs.create({ url: "options.html" });
+      }
       return {};
     case "SAVE_RECOMMENDATION":
       await setStorage({
