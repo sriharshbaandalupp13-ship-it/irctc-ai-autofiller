@@ -146,11 +146,28 @@ const STORAGE_KEYS = {
       element.select();
     }
 
-    element.value = "";
+    // Use native setter to ensure the value is cleared and updated correctly
+    // bypassing any framework-level value interception (like Angular/React).
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      (element instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement).prototype,
+      "value"
+    )?.set;
+
+    if (nativeSetter) {
+      nativeSetter.call(element, "");
+    } else {
+      element.value = "";
+    }
+    
     dispatchAllEvents(element);
 
     for (const char of text) {
-      element.value += char;
+      const currentVal = element.value;
+      if (nativeSetter) {
+        nativeSetter.call(element, currentVal + char);
+      } else {
+        element.value = currentVal + char;
+      }
       element.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
       await sleep(randomBetween(minDelay, maxDelay));
     }

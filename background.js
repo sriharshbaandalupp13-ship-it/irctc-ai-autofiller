@@ -33,7 +33,9 @@ initializeLocalSecrets();
 
 const memoryState = {
   pendingPopupPort: null,
-  inflightAvailabilityTabs: new Map()
+  inflightAvailabilityTabs: new Map(),
+  serverTimeOffset: 0,
+  lastHealthCheckStatus: true
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -234,6 +236,12 @@ async function handleMessage(message, sender) {
       return {};
     case "GET_RECOMMENDATION":
       return getRecommendation();
+    case "GET_SERVER_TIME_OFFSET":
+      return { offset: memoryState.serverTimeOffset };
+    case "PING_IRCTC_HEALTH":
+      return pingIrctcHealth();
+    case "SYNC_SERVER_TIME":
+      return syncWithServerTime();
     default:
       return {};
   }
@@ -802,6 +810,36 @@ async function safeSendToTab(tabId, message) {
     return await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
     return null;
+  }
+}
+
+async function syncWithServerTime() {
+  try {
+    const start = Date.now();
+    const response = await fetch("https://www.irctc.co.in/nget/", { method: "HEAD", cache: "no-store" });
+    const end = Date.now();
+    const serverDateStr = response.headers.get("Date");
+    if (!serverDateStr) return { ok: false };
+
+    const serverTime = new Date(serverDateStr).getTime();
+    // Add half the round-trip time to be more precise
+    const preciseServerTime = serverTime + (end - start) / 2;
+    memoryState.serverTimeOffset = preciseServerTime - end;
+    
+    return { ok: true, offset: memoryState.serverTimeOffset };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+async function pingIrctcHealth() {
+  try {
+    const response = await fetch("https://www.irctc.co.in/nget/", { method: "HEAD", cache: "no-store", timeout: 5000 });
+    memoryState.lastHealthCheckStatus = response.ok;
+    return { ok: response.ok, status: response.status };
+  } catch (error) {
+    memoryState.lastHealthCheckStatus = false;
+    return { ok: false, error: error.message };
   }
 }
 

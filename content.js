@@ -452,10 +452,10 @@
     setServerRecoveryPending(true);
     location.reload();
     return;
-    
-      
-        showStatusToast("✅ IRCTC is back online!", "success");
-        
+
+
+    showStatusToast("✅ IRCTC is back online!", "success");
+
   }
 
   async function maybeRecoverAfterServerDown() {
@@ -483,8 +483,43 @@
     contentState.captchaPaused = true;
     contentState.captchaPausedAtStep = pausedStep || null;
     contentState.captchaResumeContext = resumeContext || null;
+    highlightCaptchaElement();
     mountCaptchaBanner();
     return true;
+  }
+
+  function highlightCaptchaElement() {
+    const captchaCandidates = [
+      "#captcha", ".captcha", "img[src*='captcha']", "iframe[src*='captcha']",
+      "div[id*='captcha']", "div[class*='captcha']", ".captcha-img", ".captcha-block"
+    ];
+    
+    for (const selector of captchaCandidates) {
+      const el = document.querySelector(selector);
+      if (el && isVisible(el)) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.style.outline = "4px solid #F57C00";
+        el.style.boxShadow = "0 0 20px rgba(245, 124, 0, 0.6)";
+        el.classList.add("irctc-captcha-pulse");
+        
+        if (!document.getElementById("irctc-captcha-pulse-style")) {
+          const style = document.createElement("style");
+          style.id = "irctc-captcha-pulse-style";
+          style.textContent = `
+            @keyframes captcha-pulse {
+              0% { opacity: 1; }
+              50% { opacity: 0.6; }
+              100% { opacity: 1; }
+            }
+            .irctc-captcha-pulse {
+              animation: captcha-pulse 1s infinite;
+            }
+          `;
+          document.documentElement.appendChild(style);
+        }
+        break;
+      }
+    }
   }
 
   function isCaptchaPresent() {
@@ -522,8 +557,14 @@
       "box-shadow:0 10px 28px rgba(0,0,0,0.24)"
     ].join(";");
     banner.innerHTML = `
-      <div>🔐 CAPTCHA detected — please solve it, then click Continue</div>
-      <button id="irctc-captcha-continue" type="button" style="border:0;border-radius:10px;padding:9px 12px;background:#FF6D00;color:#fff;font-weight:700;cursor:pointer;">▶ Continue After CAPTCHA</button>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:20px;">🔐</span>
+        <div>
+          <strong style="display:block;font-size:15px;">CAPTCHA Required</strong>
+          <span style="opacity:0.9;">Solve the highlighted CAPTCHA to continue automation.</span>
+        </div>
+      </div>
+      <button id="irctc-captcha-continue" type="button" style="border:0;border-radius:10px;padding:10px 16px;background:#FF6D00;color:#fff;font-weight:800;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.2);">▶ Resume Automation</button>
     `;
     document.body.appendChild(banner);
     banner.querySelector("#irctc-captcha-continue")?.addEventListener("click", async () => {
@@ -747,9 +788,9 @@
       input.value = displayDate;
     }
 
-    input.dispatchEvent(new Event("input",  { bubbles: true }));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new Event("blur",   { bubbles: true }));
+    input.dispatchEvent(new Event("blur", { bubbles: true }));
     await humanDelay();
 
     // Verify Angular picked it up; fall back to character-by-character
@@ -757,7 +798,7 @@
     if (input.value !== displayDate) {
       await clearAndType(input, displayDate);
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("blur",   { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
       await humanDelay();
     }
   }
@@ -1661,9 +1702,11 @@
     contentState.captchaResumeContext = null;
 
     if (resumeContext.action === "search-submit") {
-      const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
-      await waitForBlockingPopupToClear();
-      searchButton.click();
+      await withRetry(async () => {
+        const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
+        await waitForBlockingPopupToClear();
+        searchButton.click();
+      }, "Search submission after CAPTCHA");
       if (journeyConfig) {
         await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
       }
@@ -1671,8 +1714,10 @@
     }
 
     if (resumeContext.action === "continue-pax") {
-      const continueButton = await findContinueButton();
-      continueButton.click();
+      await withRetry(async () => {
+        const continueButton = await findContinueButton();
+        continueButton.click();
+      }, "Continue button click after CAPTCHA");
       if (journeyConfig) {
         await saveCheckpoint("STEP_COMPLETED_PAX", journeyConfig);
       }
@@ -1925,7 +1970,7 @@
 
     return null;
   }
-
+  //test
   async function waitForTrainCards() {
     const timeoutAt = Date.now() + 12000;
     while (Date.now() < timeoutAt) {

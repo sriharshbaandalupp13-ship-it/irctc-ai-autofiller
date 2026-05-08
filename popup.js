@@ -63,6 +63,7 @@
       "paymentMode",
       "preferredCoach",
       "reservationChoice",
+      "fallbackMobile",
       "tatkalClassAc",
       "tatkalClassSleeper",
       "tatkalClassBoth",
@@ -324,6 +325,7 @@
     elements.paymentMode.value = preferences.paymentMode || DEFAULT_PREFERENCES.paymentMode;
     elements.preferredCoach.value = preferences.preferredCoach || "";
     elements.reservationChoice.value = preferences.reservationChoice || "";
+    elements.fallbackMobile.value = preferences.fallbackMobile || "";
   }
 
   function readForm() {
@@ -343,7 +345,8 @@
         onlyConfirmBerths: elements.onlyConfirmBerths.checked,
         paymentMode: elements.paymentMode.value,
         preferredCoach: elements.preferredCoach.value.trim(),
-        reservationChoice: elements.reservationChoice.value.trim()
+        reservationChoice: elements.reservationChoice.value.trim(),
+        fallbackMobile: elements.fallbackMobile.value.trim()
       },
       preferredTrain: elements.preferredTrain.value.trim(),
       fallbackClassOrder: readFallbackClassOrder(),

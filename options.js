@@ -89,6 +89,14 @@
     elements.resetGroupButton.addEventListener("click", resetGroupForm);
     elements.preferencesForm.addEventListener("submit", savePreferences);
     elements.saveCredentialsButton.addEventListener("click", saveCredentials);
+
+    document.getElementById("clearAllStateButton")?.addEventListener("click", async () => {
+      if (confirm("Are you sure you want to RESET ALL extension data? This will delete all passengers, groups, history, and credentials. This action cannot be undone.")) {
+        await chrome.storage.local.clear();
+        alert("All extension data has been reset. The page will now reload.");
+        location.reload();
+      }
+    });
   }
 
   async function loadState() {
