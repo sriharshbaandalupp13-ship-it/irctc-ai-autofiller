@@ -23,6 +23,9 @@ const ALARM_NAMES = {
   TATKAL_START: "tatkal-start",
   TATKAL_REMINDER: "tatkal-reminder",
   TATKAL_PRE_POSITION: "tatkal-pre-position",
+  TATKAL_START_SLEEPER: "tatkal-start-sleeper",
+  TATKAL_REMINDER_SLEEPER: "tatkal-reminder-sleeper",
+  TATKAL_PRE_POSITION_SLEEPER: "tatkal-pre-position-sleeper",
   AVAILABILITY_POLL: "availability-alert-poll"
 };
 
@@ -64,7 +67,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === ALARM_NAMES.TATKAL_REMINDER) {
+  const tatkalAlarm = getTatkalAlarmContext(alarm.name);
+
+  if (tatkalAlarm?.phase === "reminder") {
     await chrome.notifications.create({
       type: "basic",
       iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WnXlUQAAAAASUVORK5CYII=",
@@ -74,24 +79,40 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
 
-  if (alarm.name === ALARM_NAMES.TATKAL_PRE_POSITION) {
+  if (tatkalAlarm?.phase === "pre") {
     const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
     if (!tatkalRushConfig?.enabled || !tatkalRushConfig?.journeyConfig) {
       return;
     }
+
+    const journeyConfig = buildTatkalJourneyConfig(tatkalRushConfig.journeyConfig, tatkalAlarm.slotType, {
+      mode: "pre-position",
+      tatkalPrePositioned: true
+    });
 
     const tabId = await openOrNavigateToIrctcTab(IRCTC_URLS.SEARCH);
     if (!tabId) {
       return;
     }
 
+    await setStorage({
+      [STORAGE_KEYS.ACTIVE_BOOKING]: {
+        mode: "tatkalPrePosition",
+        journeyConfig,
+        sourceTabId: tabId,
+        triggeredBy: "tatkal-pre-position",
+        lastUpdatedAt: new Date().toISOString()
+      }
+    });
+
     await safeSendToTab(tabId, {
-      type: "TATKAL_PRE_FILL_SEARCH"
+      type: "TATKAL_PRE_FILL_SEARCH",
+      journeyConfig
     });
     return;
   }
 
-  if (alarm.name === ALARM_NAMES.TATKAL_START) {
+  if (tatkalAlarm?.phase === "start") {
     const { [STORAGE_KEYS.TATKAL_RUSH_CONFIG]: tatkalRushConfig } = await getStorage([STORAGE_KEYS.TATKAL_RUSH_CONFIG]);
     if (!tatkalRushConfig?.enabled || !tatkalRushConfig?.journeyConfig) {
       return;
@@ -109,13 +130,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       return;
     }
 
-    const journeyConfig = buildJourneyConfig({
-      ...tatkalRushConfig.journeyConfig,
-      metadata: {
-        ...(tatkalRushConfig.journeyConfig.metadata || {}),
-        mode: "booking",
-        tatkalTriggeredAt: new Date().toISOString()
-      }
+    const journeyConfig = buildTatkalJourneyConfig(tatkalRushConfig.journeyConfig, tatkalAlarm.slotType, {
+      mode: "booking",
+      tatkalPrePositioned: true,
+      tatkalTriggeredAt: new Date().toISOString()
     });
 
     await setStorage({
@@ -193,6 +211,8 @@ async function handleMessage(message, sender) {
       return setTatkalAlarm(message.payload);
     case "CLEAR_TATKAL_ALARM":
       return clearTatkalAlarm();
+    case "GEMINI_SELECTOR_QUERY":
+      return runGeminiSelectorQuery(message.payload);
     case "PAGE_READY":
       return handlePageReady(message.payload, sender);
     case "SERVER_DOWN_NOTIFY":
@@ -270,11 +290,12 @@ async function saveJourneyDraft(payload) {
   };
 
   if (journeyConfig.tatkalRushMode) {
-    const schedule = computeTatkalTime(journeyConfig);
+    const tatkalClassType = journeyConfig.tatkalClassType || payload?.tatkalClassType || inferTatkalClassType(journeyConfig);
+    const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType === "both" ? "ac" : tatkalClassType));
     const tatkalRushConfig = {
       enabled: true,
-      tatkalClassType: journeyConfig.tatkalClassType || payload?.tatkalClassType || inferTatkalClassType(journeyConfig),
-      slotLabel: schedule.slotLabel,
+      tatkalClassType,
+      slotLabel: tatkalClassType === "both" ? "10:00:00 AM / 11:00:00 AM" : schedule.slotLabel,
       scheduledFor: schedule.startAt.toISOString(),
       reminderFor: schedule.reminderAt.toISOString(),
       journeyConfig
@@ -499,6 +520,13 @@ async function handlePageReady(payload, sender) {
   const tabId = sender.tab.id;
   const journeyConfig = activeBooking.journeyConfig;
 
+  if (isSearchPage(payload.url) && activeBooking.mode === "tatkalPrePosition") {
+    await safeSendToTab(tabId, {
+      type: "TATKAL_PRE_FILL_SEARCH",
+      journeyConfig
+    });
+  }
+
   if (isSearchPage(payload.url) && (activeBooking.mode === "booking" || activeBooking.mode === "availabilityCheck")) {
     await safeSendToTab(tabId, {
       type: activeBooking.mode === "availabilityCheck" ? "RUN_AVAILABILITY_PAGE1" : "START_PAGE_AUTOMATION",
@@ -550,7 +578,19 @@ async function finalizeBooking(payload) {
     journeyConfig
   };
 
-  const nextHistory = [historyEntry, ...data.bookingHistory].slice(0, 10);
+  const latestEntry = data.bookingHistory[0];
+  const isDuplicateRecentEntry = latestEntry
+    && latestEntry.fromStation === historyEntry.fromStation
+    && latestEntry.toStation === historyEntry.toStation
+    && latestEntry.journeyDate === historyEntry.journeyDate
+    && latestEntry.journeyClass === historyEntry.journeyClass
+    && latestEntry.trainName === historyEntry.trainName
+    && JSON.stringify(latestEntry.passengers || []) === JSON.stringify(historyEntry.passengers || [])
+    && Math.abs(new Date(latestEntry.timestamp).getTime() - new Date(historyEntry.timestamp).getTime()) < 10 * 60 * 1000;
+
+  const nextHistory = isDuplicateRecentEntry
+    ? data.bookingHistory.slice(0, 10)
+    : [historyEntry, ...data.bookingHistory].slice(0, 10);
   await setStorage({
     [STORAGE_KEYS.BOOKING_HISTORY]: nextHistory,
     [STORAGE_KEYS.ACTIVE_BOOKING]: null,
@@ -578,6 +618,26 @@ async function getActiveBooking() {
 async function getRecommendation() {
   const { [STORAGE_KEYS.LATEST_RECOMMENDATION]: latestRecommendation } = await getStorage([STORAGE_KEYS.LATEST_RECOMMENDATION]);
   return { latestRecommendation };
+}
+
+async function runGeminiSelectorQuery(payload) {
+  const { [STORAGE_KEYS.GEMINI_API_KEY]: geminiApiKey } = await getStorage([STORAGE_KEYS.GEMINI_API_KEY]);
+  if (!geminiApiKey) {
+    return { selector: null };
+  }
+
+  const result = await IRCTCUtils.callGeminiSelector({
+    apiKey: geminiApiKey,
+    purpose: payload?.purpose || "Recover a selector",
+    domSummary: payload?.domSummary || "",
+    url: payload?.url || "",
+    selectorHints: payload?.selectorHints || []
+  });
+
+  return {
+    selector: result?.selector || null,
+    reason: result?.reason || ""
+  };
 }
 
 async function seedStorageDefaults() {
@@ -619,11 +679,11 @@ async function hasStoredValue(key) {
 async function setTatkalAlarm(payload) {
   const journeyConfig = buildJourneyConfig(payload?.journeyConfig || {});
   const tatkalClassType = payload?.tatkalClassType || journeyConfig.tatkalClassType || inferTatkalClassType(journeyConfig);
-  const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType));
+  const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType === "both" ? "ac" : tatkalClassType));
   const tatkalRushConfig = {
     enabled: true,
     tatkalClassType,
-    slotLabel: schedule.slotLabel,
+    slotLabel: tatkalClassType === "both" ? "10:00:00 AM / 11:00:00 AM" : schedule.slotLabel,
     scheduledFor: schedule.startAt.toISOString(),
     reminderFor: schedule.reminderAt.toISOString(),
     journeyConfig
@@ -641,18 +701,23 @@ async function clearTatkalAlarm() {
   await chrome.alarms.clear(ALARM_NAMES.TATKAL_START);
   await chrome.alarms.clear(ALARM_NAMES.TATKAL_REMINDER);
   await chrome.alarms.clear(ALARM_NAMES.TATKAL_PRE_POSITION);
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_START_SLEEPER);
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_REMINDER_SLEEPER);
+  await chrome.alarms.clear(ALARM_NAMES.TATKAL_PRE_POSITION_SLEEPER);
   return {};
 }
 
 async function scheduleTatkalAlarms(tatkalRushConfig) {
   const journeyConfig = tatkalRushConfig?.journeyConfig || {};
   const tatkalClassType = tatkalRushConfig?.tatkalClassType || inferTatkalClassType(journeyConfig);
-  const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, tatkalClassType));
 
   await clearTatkalAlarm();
-  await chrome.alarms.create(ALARM_NAMES.TATKAL_PRE_POSITION, { when: schedule.startAt.getTime() - 15 * 60 * 1000 });
-  await chrome.alarms.create(ALARM_NAMES.TATKAL_START, { when: schedule.startAt.getTime() });
-  await chrome.alarms.create(ALARM_NAMES.TATKAL_REMINDER, { when: schedule.reminderAt.getTime() });
+  for (const definition of getTatkalAlarmDefinitions(tatkalClassType)) {
+    const schedule = computeTatkalTime(getTatkalScheduleJourney(journeyConfig, definition.slotType));
+    await chrome.alarms.create(definition.prePositionName, { when: schedule.startAt.getTime() - 15 * 60 * 1000 });
+    await chrome.alarms.create(definition.startName, { when: schedule.startAt.getTime() });
+    await chrome.alarms.create(definition.reminderName, { when: schedule.reminderAt.getTime() });
+  }
 }
 
 function getTatkalScheduleJourney(journeyConfig, tatkalClassType) {
@@ -664,6 +729,66 @@ function getTatkalScheduleJourney(journeyConfig, tatkalClassType) {
 
 function inferTatkalClassType(journeyConfig) {
   return String(journeyConfig?.journeyClass || "").trim().toUpperCase() === "SL" ? "sleeper" : "ac";
+}
+
+function getTatkalAlarmDefinitions(tatkalClassType) {
+  if (tatkalClassType === "both") {
+    return [
+      {
+        slotType: "ac",
+        startName: ALARM_NAMES.TATKAL_START,
+        reminderName: ALARM_NAMES.TATKAL_REMINDER,
+        prePositionName: ALARM_NAMES.TATKAL_PRE_POSITION
+      },
+      {
+        slotType: "sleeper",
+        startName: ALARM_NAMES.TATKAL_START_SLEEPER,
+        reminderName: ALARM_NAMES.TATKAL_REMINDER_SLEEPER,
+        prePositionName: ALARM_NAMES.TATKAL_PRE_POSITION_SLEEPER
+      }
+    ];
+  }
+
+  if (tatkalClassType === "sleeper") {
+    return [{
+      slotType: "sleeper",
+      startName: ALARM_NAMES.TATKAL_START_SLEEPER,
+      reminderName: ALARM_NAMES.TATKAL_REMINDER_SLEEPER,
+      prePositionName: ALARM_NAMES.TATKAL_PRE_POSITION_SLEEPER
+    }];
+  }
+
+  return [{
+    slotType: "ac",
+    startName: ALARM_NAMES.TATKAL_START,
+    reminderName: ALARM_NAMES.TATKAL_REMINDER,
+    prePositionName: ALARM_NAMES.TATKAL_PRE_POSITION
+  }];
+}
+
+function getTatkalAlarmContext(alarmName) {
+  const definitions = [
+    { phase: "start", slotType: "ac", name: ALARM_NAMES.TATKAL_START },
+    { phase: "reminder", slotType: "ac", name: ALARM_NAMES.TATKAL_REMINDER },
+    { phase: "pre", slotType: "ac", name: ALARM_NAMES.TATKAL_PRE_POSITION },
+    { phase: "start", slotType: "sleeper", name: ALARM_NAMES.TATKAL_START_SLEEPER },
+    { phase: "reminder", slotType: "sleeper", name: ALARM_NAMES.TATKAL_REMINDER_SLEEPER },
+    { phase: "pre", slotType: "sleeper", name: ALARM_NAMES.TATKAL_PRE_POSITION_SLEEPER }
+  ];
+
+  return definitions.find((definition) => definition.name === alarmName) || null;
+}
+
+function buildTatkalJourneyConfig(journeyConfig, tatkalClassType, extraMetadata = {}) {
+  const scheduledJourney = getTatkalScheduleJourney(journeyConfig, tatkalClassType);
+  return buildJourneyConfig({
+    ...scheduledJourney,
+    metadata: {
+      ...(journeyConfig?.metadata || {}),
+      ...extraMetadata,
+      tatkalClassType
+    }
+  });
 }
 
 function pushPopupEvent(type, payload) {

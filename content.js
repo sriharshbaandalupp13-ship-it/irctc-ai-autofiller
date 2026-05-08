@@ -99,6 +99,14 @@
     STEP_COMPLETED_PAYMENT: "Payment handoff reached"
   };
 
+  const PROGRESS_STEPS = [
+    { id: "login", label: "Login" },
+    { id: "search", label: "Search" },
+    { id: "train", label: "Select Train" },
+    { id: "pax", label: "Passenger Details" },
+    { id: "payment", label: "Payment Ready" }
+  ];
+
   const contentState = {
     activeConfig: null,
     widgetMounted: false,
@@ -110,10 +118,13 @@
     autoOkWatcherStarted: false,
     captchaPaused: false,
     captchaPausedAtStep: null,
+    captchaResumeContext: null,
     tatkalPrePositioned: false,
     sessionExpiryPollerStarted: false,
     serverDownPollerStarted: false,
-    lastUrlChangeAt: Date.now()
+    lastUrlChangeAt: Date.now(),
+    progressMessage: "IRCTC AutoFill is ready.",
+    progressMinimized: false
   };
 
   init();
@@ -141,6 +152,7 @@
     startServerDownWatcher();
     startCaptchaMonitor();
     setTimeout(() => detectServerDown(), 15000);
+    await maybeRecoverAfterServerDown();
     if (isTrainListPage(location.href)) {
       await handleTrainListAutomation();
     }
@@ -358,6 +370,7 @@
     }
 
     mountServerDownBanner();
+    setServerRecoveryPending(true);
     await safeSendRuntimeMessage({ type: "SERVER_DOWN_NOTIFY" });
     return true;
   }
@@ -436,28 +449,40 @@
   }
 
   async function refreshServerPageForHealth() {
-    const currentUrl = location.href;
+    setServerRecoveryPending(true);
     location.reload();
-    const timeoutAt = Date.now() + 15000;
-    while (Date.now() < timeoutAt) {
-      if (document.querySelector("app-root, #app")) {
-        unmountServerDownBanner();
+    return;
+    
+      
         showStatusToast("✅ IRCTC is back online!", "success");
-        await safeSendRuntimeMessage({ type: "SERVER_BACK_NOTIFY" });
-        await resumeBookingFlow();
-        return;
-      }
-      await sleep(800);
-    }
-    mountServerDownBanner();
+        
   }
 
-  async function detectAndHandleCaptcha(pausedStep) {
+  async function maybeRecoverAfterServerDown() {
+    if (!getServerRecoveryPending()) {
+      return false;
+    }
+
+    const stillDown = await detectServerDown();
+    if (stillDown) {
+      return false;
+    }
+
+    clearServerRecoveryPending();
+    unmountServerDownBanner();
+    showStatusToast("IRCTC is back online!", "success");
+    await safeSendRuntimeMessage({ type: "SERVER_BACK_NOTIFY" });
+    await resumeBookingFlow();
+    return true;
+  }
+
+  async function detectAndHandleCaptcha(pausedStep, resumeContext = null) {
     if (contentState.captchaPaused || !isCaptchaPresent()) {
       return false;
     }
     contentState.captchaPaused = true;
     contentState.captchaPausedAtStep = pausedStep || null;
+    contentState.captchaResumeContext = resumeContext || null;
     mountCaptchaBanner();
     return true;
   }
@@ -504,7 +529,7 @@
     banner.querySelector("#irctc-captcha-continue")?.addEventListener("click", async () => {
       unmountCaptchaBanner();
       contentState.captchaPaused = false;
-      await resumeBookingFlow();
+      await resumeAfterCaptcha();
     });
   }
 
@@ -577,7 +602,8 @@
 
   async function runSearchAutomationImpl(journeyConfig, isAvailabilityMode) {
     contentState.activeConfig = journeyConfig;
-    if (await detectAndHandleCaptcha("STEP_COMPLETED_SEARCH")) {
+    contentState.tatkalPrePositioned = Boolean(contentState.tatkalPrePositioned || journeyConfig?.metadata?.tatkalPrePositioned);
+    if (await detectAndHandleCaptcha("STEP_COMPLETED_SEARCH", { action: "search-submit" })) {
       return { pausedByCaptcha: true };
     }
     await waitForBlockingPopupToClear();
@@ -588,6 +614,9 @@
       await humanDelay(140, 260);
       searchButton.click();
       contentState.tatkalPrePositioned = false;
+      if (journeyConfig?.metadata) {
+        journeyConfig.metadata.tatkalPrePositioned = false;
+      }
       await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
       return { submitted: true };
     }
@@ -654,6 +683,8 @@
 
   const runSearchAutomation = (journeyConfig, isAvailabilityMode) => {
     mountProgressOverlay("Filling journey search form...");
+    updateProgressOverlay("login", "complete");
+    updateProgressOverlay("search", "active", "Filling journey search form...");
     return withRetry(() => runSearchAutomationImpl(journeyConfig, isAvailabilityMode), "Search form fill", 3)
       .finally(() => unmountProgressOverlay());
   };
@@ -867,7 +898,7 @@
     }
 
     const continueButton = await findContinueButton();
-    if (await detectAndHandleCaptcha("STEP_COMPLETED_PAX")) {
+    if (await detectAndHandleCaptcha("STEP_COMPLETED_PAX", { action: "continue-pax" })) {
       return { pausedByCaptcha: true };
     }
     continueButton.click();
@@ -882,6 +913,7 @@
 
   const runPassengerAutomation = (journeyConfig) => {
     mountProgressOverlay("Completing passenger details...");
+    updateProgressOverlay("pax", "active", "Completing passenger details...");
     return withRetry(() => runPassengerAutomationImpl(journeyConfig), "Passenger details fill", 3)
       .finally(() => unmountProgressOverlay());
   };
@@ -945,8 +977,27 @@
       "select[name*='id']"
     ], { skipIfMissing: true });
 
-    if (idProofDropdown && passenger.idProof) {
-      await clickAngularDropdown(idProofDropdown, passenger.idProof, `ID proof for passenger ${index + 1}`);
+    if (idProofDropdown && passenger.idProofType) {
+      if (idProofDropdown.tagName === "SELECT") {
+        idProofDropdown.value = passenger.idProofType;
+        dispatchAllEvents(idProofDropdown);
+      } else {
+        await clickAngularDropdown(idProofDropdown, passenger.idProofType, `ID proof for passenger ${index + 1}`);
+      }
+    }
+
+    const idProofNumberInput = await findWithinRow(row, [
+      "input[formcontrolname*='idCardNo']",
+      "input[formcontrolname*='idcard']",
+      "input[name*='idProofNumber']",
+      "input[name*='idCard']",
+      "input[placeholder*='ID Proof Number']",
+      "input[placeholder*='ID Card Number']"
+    ], { skipIfMissing: true });
+
+    if (idProofNumberInput && passenger.idProofNumber) {
+      await clearAndType(idProofNumberInput, passenger.idProofNumber);
+      await humanDelay();
     }
 
     const seniorCheckbox = await findCheckboxByLabelInRow(row, /senior citizen|senior concession|60\+|60 years|senior/i, true);
@@ -971,8 +1022,14 @@
     const { [STORAGE_KEYS.DEFAULT_PREFERENCES]: defaults = {} } = await getStorage([STORAGE_KEYS.DEFAULT_PREFERENCES]);
     const fallbackMobile = journeyConfig.preferences?.fallbackMobile || defaults.fallbackMobile || "";
     const mobileInput = await findByLabelText(/mobile/i, { skipIfMissing: true });
-    if (mobileInput && !mobileInput.value.trim() && fallbackMobile) {
-      await clearAndType(mobileInput, fallbackMobile);
+    if (mobileInput && fallbackMobile) {
+      const currentDigits = String(mobileInput.value || "").replace(/\D/g, "");
+      const fallbackDigits = String(fallbackMobile || "").replace(/\D/g, "");
+      if (!currentDigits || currentDigits.length < 10) {
+        await clearAndType(mobileInput, fallbackMobile);
+      } else if (currentDigits === fallbackDigits) {
+        showStatusToast("Contact mobile verified", "success");
+      }
     }
 
     await setCheckboxByLabel(/auto upgrad/i, Boolean(journeyConfig.preferences?.autoUpgrade), true);
@@ -1095,10 +1152,13 @@
     const activeJourney = await getResolvedJourneyConfig(journeyConfig);
     const autoSelectTrain = Boolean(activeJourney?.autoSelectTrain || activeJourney?.metadata?.autoSelectTrain);
     await saveCheckpoint("STEP_WAITING_TRAIN_SELECT", activeJourney);
+    mountProgressOverlay("Preparing train selection...");
+    updateProgressOverlay("train", "active", "Preparing train selection...");
 
     if (!autoSelectTrain) {
       await showReadyBadge();
       await maybeGenerateTrainRecommendation(activeJourney);
+      updateProgressOverlay("train", "active", "Waiting for manual train selection.");
       return {};
     }
 
@@ -1162,6 +1222,9 @@
   async function reportBookingCompleted() {
     const journeyConfig = await getResolvedJourneyConfig(contentState.activeConfig);
     await saveCheckpoint("STEP_COMPLETED_PAYMENT", journeyConfig);
+    mountProgressOverlay("Payment page ready.");
+    updateProgressOverlay("payment", "complete", "Payment page ready.");
+    setTimeout(() => unmountProgressOverlay(), 5000);
     const trainName = document.querySelector(".train-heading, .train-name, h5")?.textContent?.trim() || "";
     await safeSendRuntimeMessage({
       type: "BOOKING_COMPLETED",
@@ -1370,6 +1433,9 @@
       }
     });
 
+    mountProgressOverlay(contentState.progressMessage || "Tracking booking progress...");
+    updateProgressFromCheckpoint(step);
+
     if (step === "STEP_COMPLETED_PAYMENT") {
       setTimeout(() => {
         setStorage({ [STORAGE_KEYS.BOOKING_CHECKPOINT]: null });
@@ -1512,6 +1578,8 @@
       case "STEP_COMPLETED_PAX":
         if (currentPage === "PAYMENT") {
           showStatusToast("You are at payment page — please complete payment.", "info");
+          mountProgressOverlay("Payment page ready.");
+          updateProgressOverlay("payment", "complete", "Payment page ready.");
           return { resumed: true };
         }
         if (currentPage === "PAX") {
@@ -1529,6 +1597,8 @@
         return { navigating: true };
       case "STEP_COMPLETED_PAYMENT":
         showStatusToast("Booking already reached payment. Please complete payment.", "info");
+        mountProgressOverlay("Payment page ready.");
+        updateProgressOverlay("payment", "complete", "Payment page ready.");
         return { resumed: currentPage === "PAYMENT" };
       default:
         return { resumed: false };
@@ -1550,6 +1620,44 @@
     }
   }
 
+  async function resumeAfterCaptcha() {
+    const journeyConfig = contentState.activeConfig || (await getActiveJourneyFromStorage()) || null;
+    const resumeContext = contentState.captchaResumeContext || {};
+    const pausedStep = contentState.captchaPausedAtStep;
+
+    contentState.captchaPausedAtStep = null;
+    contentState.captchaResumeContext = null;
+
+    if (resumeContext.action === "search-submit") {
+      const searchButton = await findElement("Search Trains button", SELECTORS.searchButton);
+      await waitForBlockingPopupToClear();
+      searchButton.click();
+      if (journeyConfig) {
+        await saveCheckpoint("STEP_COMPLETED_SEARCH", journeyConfig);
+      }
+      return { resumed: true };
+    }
+
+    if (resumeContext.action === "continue-pax") {
+      const continueButton = await findContinueButton();
+      continueButton.click();
+      if (journeyConfig) {
+        await saveCheckpoint("STEP_COMPLETED_PAX", journeyConfig);
+      }
+      return { resumed: true };
+    }
+
+    if (resumeContext.action === "book-now" || pausedStep === "STEP_COMPLETED_TRAIN_SELECT") {
+      return autoSelectBestTrain(journeyConfig || {});
+    }
+
+    if (pausedStep === "STEP_WAITING_TRAIN_SELECT") {
+      return handleTrainListAutomation(journeyConfig);
+    }
+
+    return resumeBookingFlow();
+  }
+
   async function autoSelectBestTrainImpl(journeyConfig = {}) {
     try {
       await showReadyBadge("Auto-selecting the best train...");
@@ -1557,7 +1665,7 @@
       await waitForTrainCards();
       await humanDelay();
 
-      if (await detectAndHandleCaptcha("STEP_WAITING_TRAIN_SELECT")) {
+      if (await detectAndHandleCaptcha("STEP_WAITING_TRAIN_SELECT", { action: "train-auto-select" })) {
         return { pausedByCaptcha: true };
       }
 
@@ -1619,7 +1727,11 @@
       if (!bookNowButton) {
         throw await createUserVisibleError(`Could not find Book Now for train ${selection.train.trainNumber}.`, card);
       }
-      if (await detectAndHandleCaptcha("STEP_COMPLETED_TRAIN_SELECT")) {
+      if (await detectAndHandleCaptcha("STEP_COMPLETED_TRAIN_SELECT", {
+        action: "book-now",
+        trainNumber: selection.train.trainNumber,
+        selectedClass: selection.selectedClass
+      })) {
         return { pausedByCaptcha: true };
       }
 
@@ -1793,21 +1905,26 @@
   }
 
   async function autoRefreshSeats() {
-    const candidate = Array.from(document.querySelectorAll("button, input[type='button'], a"))
+    const candidates = Array.from(document.querySelectorAll("button, input[type='button'], a"))
       .filter((element) => isVisible(element))
-      .find((element) => {
+      .filter((element) => {
         const label = normalizeText(element.textContent || element.value || element.getAttribute("aria-label") || "");
         return /refresh|re[- ]?check|update|reload/i.test(label);
       });
 
-    if (candidate) {
-      candidate.click();
-      await humanDelay(520, 780);
+    const beforeSnapshot = captureAvailabilitySnapshot();
+
+    if (candidates.length) {
+      for (const candidate of candidates) {
+        candidate.click();
+        await humanDelay(120, 240);
+      }
+      await waitForAvailabilityRefresh(beforeSnapshot);
       await waitForTrainCards();
       return;
     }
 
-    await sleep(900);
+    await waitForAvailabilityRefresh(beforeSnapshot, true);
   }
 
   async function findElement(purpose, selectors) {
@@ -1846,22 +1963,21 @@
 
   async function findWithGeminiFallback(purpose, selectors) {
     try {
-      const { [STORAGE_KEYS.GEMINI_API_KEY]: geminiApiKey } = await getStorage([STORAGE_KEYS.GEMINI_API_KEY]);
-      if (!geminiApiKey) {
+      const response = await safeSendRuntimeMessage({
+        type: "GEMINI_SELECTOR_QUERY",
+        payload: {
+          purpose,
+          url: location.href,
+          selectorHints: selectors,
+          domSummary: serializeDomForGemini(document)
+        }
+      });
+      if (!response?.ok || !response.selector) {
         return null;
       }
-      const result = await callGeminiSelector({
-        apiKey: geminiApiKey,
-        purpose,
-        url: location.href,
-        selectorHints: selectors,
-        domSummary: serializeDomForGemini(document)
-      });
-      if (result?.selector) {
-        const element = document.querySelector(result.selector);
-        if (element) {
-          return element;
-        }
+      const element = document.querySelector(response.selector);
+      if (element) {
+        return element;
       }
       return null;
     } catch (error) {
@@ -1928,6 +2044,7 @@
     if (targetElement) {
       highlightProblem(targetElement);
     }
+    unmountProgressOverlay();
     await updateStatus("error", message, [
       { label: "Automation paused", state: "error", detail: message }
     ]);
@@ -1955,6 +2072,9 @@
   }
 
   async function updateStatus(phase, message, steps) {
+    if (message) {
+      updateProgressOverlay(message);
+    }
     await safeSendRuntimeMessage({
       type: "UPDATE_STATUS",
       payload: {
@@ -2018,6 +2138,7 @@
   }
 
   async function withRetry(action, purpose, attempts = 3) {
+    const delays = [2000, 5000, 12000];
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
@@ -2026,10 +2147,12 @@
         lastError = error;
         if (attempt < attempts) {
           showStatusToast(`Retrying ${purpose} (${attempt + 1}/${attempts})...`, "info");
-          await sleep(400 + Math.random() * 300);
+          await sleep(delays[Math.min(attempt - 1, delays.length - 1)]);
         }
       }
     }
+    contentState.activeConfig = null;
+    showPersistentErrorToast(`${purpose} failed after ${attempts} attempts. You can dismiss this and continue manually.`);
     throw lastError;
   }
 
@@ -2043,50 +2166,277 @@
     overlay.id = "irctc-autofill-progress-overlay";
     overlay.style.cssText = [
       "position:fixed",
-      "inset:0",
-      "background:rgba(10,18,55,0.72)",
+      "right:18px",
+      "bottom:88px",
       "z-index:2147483646",
-      "display:flex",
-      "align-items:center",
-      "justify-content:center",
-      "padding:20px"
+      "width:320px",
+      "max-width:calc(100vw - 24px)"
     ].join(";");
 
     const panel = document.createElement("div");
     panel.style.cssText = [
-      "max-width:420px",
-      "width:100%",
       "background:#fff",
       "border-radius:20px",
-      "padding:22px",
-      "text-align:center",
+      "padding:16px",
       "box-shadow:0 24px 75px rgba(0,0,0,0.22)",
-      "font:14px/1.5 'Segoe UI',sans-serif"
+      "font:13px/1.45 'Segoe UI',sans-serif",
+      "border:1px solid rgba(26,35,126,0.12)"
     ].join(";");
+
+    const header = document.createElement("div");
+    header.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;";
+    header.innerHTML = `
+      <strong style="color:#1a237e;">Booking Progress</strong>
+      <button id="irctc-progress-minimize" type="button" style="border:0;border-radius:10px;padding:6px 10px;background:#eef2ff;color:#1a237e;font-weight:700;cursor:pointer;">-</button>
+    `;
 
     const text = document.createElement("div");
     text.id = "irctc-autofill-progress-text";
     text.textContent = message;
-    text.style.marginBottom = "10px";
+    text.style.marginBottom = "12px";
     text.style.fontWeight = "700";
     text.style.color = "#1a237e";
 
+    const stepList = document.createElement("div");
+    stepList.id = "irctc-autofill-progress-steps";
+    stepList.style.cssText = "display:grid;gap:8px;";
+    PROGRESS_STEPS.forEach((step) => {
+      const item = document.createElement("div");
+      item.dataset.stepId = step.id;
+      item.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border-radius:12px;background:#f7f8fb;";
+      item.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="irctc-progress-dot" style="width:12px;height:12px;border-radius:999px;background:#c4c9d4;display:inline-block;"></span>
+          <span>${step.label}</span>
+        </div>
+        <span class="irctc-progress-state" style="font-size:11px;color:#6b7280;">Pending</span>
+      `;
+      stepList.appendChild(item);
+    });
+
+    let style = document.getElementById("irctc-autofill-progress-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "irctc-autofill-progress-style";
+      style.textContent = `
+        @keyframes irctc-progress-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        #irctc-autofill-progress-overlay.minimized #irctc-autofill-progress-text,
+        #irctc-autofill-progress-overlay.minimized #irctc-autofill-progress-steps {
+          display: none;
+        }
+      `;
+      document.documentElement.appendChild(style);
+    }
+
+    panel.appendChild(header);
     panel.appendChild(text);
+    panel.appendChild(stepList);
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
+    overlay.querySelector("#irctc-progress-minimize")?.addEventListener("click", () => {
+      contentState.progressMinimized = !contentState.progressMinimized;
+      overlay.classList.toggle("minimized", contentState.progressMinimized);
+      overlay.querySelector("#irctc-progress-minimize").textContent = contentState.progressMinimized ? "+" : "-";
+    });
+    resetProgressOverlay();
+    updateProgressOverlay(message);
   }
 
-  function updateProgressOverlay(message) {
+  function updateProgressOverlay(stepOrMessage, state = null, message = "") {
     const text = document.getElementById("irctc-autofill-progress-text");
-    if (text) {
+    if (typeof stepOrMessage === "string" && state === null) {
+      contentState.progressMessage = stepOrMessage;
+      if (text) {
+        text.textContent = stepOrMessage;
+      }
+      return;
+    }
+
+    if (text && message) {
       text.textContent = message;
     }
+
+    const item = document.querySelector(`[data-step-id="${stepOrMessage}"]`);
+    if (!item) {
+      return;
+    }
+
+    const dot = item.querySelector(".irctc-progress-dot");
+    const label = item.querySelector(".irctc-progress-state");
+    if (!dot || !label) {
+      return;
+    }
+
+    if (state === "complete") {
+      dot.style.background = "#1f9d57";
+      dot.style.border = "0";
+      dot.style.animation = "none";
+      label.textContent = "Complete";
+      label.style.color = "#1f9d57";
+      return;
+    }
+
+    if (state === "active") {
+      dot.style.background = "transparent";
+      dot.style.border = "2px solid #1a73e8";
+      dot.style.borderTopColor = "transparent";
+      dot.style.animation = "irctc-progress-spin 1s linear infinite";
+      label.textContent = "Active";
+      label.style.color = "#1a73e8";
+      return;
+    }
+
+    dot.style.background = "#c4c9d4";
+    dot.style.border = "0";
+    dot.style.animation = "none";
+    label.textContent = "Pending";
+    label.style.color = "#6b7280";
   }
 
   function unmountProgressOverlay() {
     const overlay = document.getElementById("irctc-autofill-progress-overlay");
     if (overlay) {
       overlay.remove();
+    }
+  }
+
+  function resetProgressOverlay() {
+    PROGRESS_STEPS.forEach((step) => updateProgressOverlay(step.id, "pending"));
+    const page = getCurrentPage();
+    if (page === "LOGIN") {
+      updateProgressOverlay("login", "active");
+    } else if (page === "SEARCH") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "active");
+    } else if (page === "TRAIN_LIST") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "active");
+    } else if (page === "PAX") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "complete");
+      updateProgressOverlay("pax", "active");
+    } else if (page === "PAYMENT") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "complete");
+      updateProgressOverlay("pax", "complete");
+      updateProgressOverlay("payment", "complete");
+    }
+  }
+
+  function updateProgressFromCheckpoint(step) {
+    resetProgressOverlay();
+    if (step === "STEP_COMPLETED_LOGIN") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "active");
+      return;
+    }
+    if (step === "STEP_COMPLETED_SEARCH" || step === "STEP_WAITING_TRAIN_SELECT") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "active");
+      return;
+    }
+    if (step === "STEP_COMPLETED_TRAIN_SELECT") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "complete");
+      updateProgressOverlay("pax", "active");
+      return;
+    }
+    if (step === "STEP_COMPLETED_PAX") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "complete");
+      updateProgressOverlay("pax", "complete");
+      updateProgressOverlay("payment", "active");
+      return;
+    }
+    if (step === "STEP_COMPLETED_PAYMENT") {
+      updateProgressOverlay("login", "complete");
+      updateProgressOverlay("search", "complete");
+      updateProgressOverlay("train", "complete");
+      updateProgressOverlay("pax", "complete");
+      updateProgressOverlay("payment", "complete");
+    }
+  }
+
+  function captureAvailabilitySnapshot() {
+    return parseTrainCards()
+      .map((train) => `${train.trainNumber}:${Object.entries(train.availability || {}).map(([className, value]) => `${className}-${normalizeText(value)}`).join("|")}`)
+      .join("||");
+  }
+
+  async function waitForAvailabilityRefresh(previousSnapshot, allowStableFallback = false) {
+    const timeoutAt = Date.now() + 10000;
+    while (Date.now() < timeoutAt) {
+      const trains = parseTrainCards();
+      const currentSnapshot = captureAvailabilitySnapshot();
+      const hasAvailabilityData = trains.some((train) => Object.values(train.availability || {}).some((value) => normalizeText(value)));
+      if (hasAvailabilityData && (allowStableFallback || currentSnapshot !== previousSnapshot)) {
+        return true;
+      }
+      await sleep(300);
+    }
+    return allowStableFallback;
+  }
+
+  function showPersistentErrorToast(message) {
+    let toast = document.getElementById("irctc-autofill-persistent-error");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "irctc-autofill-persistent-error";
+      toast.style.cssText = [
+        "position:fixed",
+        "right:18px",
+        "bottom:18px",
+        "z-index:2147483647",
+        "max-width:360px",
+        "padding:14px 16px",
+        "border-radius:16px",
+        "background:#7f1d1d",
+        "color:#fff",
+        "font:13px/1.45 'Segoe UI',sans-serif",
+        "box-shadow:0 18px 40px rgba(0,0,0,0.22)"
+      ].join(";");
+      document.body.appendChild(toast);
+    }
+    toast.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div>${escapeHtml(message)}</div>
+        <div style="display:flex;justify-content:flex-end;">
+          <button id="irctc-persistent-error-dismiss" type="button" style="border:0;border-radius:10px;padding:8px 12px;background:#fff;color:#7f1d1d;font-weight:700;cursor:pointer;">Dismiss</button>
+        </div>
+      </div>
+    `;
+    toast.querySelector("#irctc-persistent-error-dismiss")?.addEventListener("click", () => {
+      toast.remove();
+    });
+  }
+
+  function setServerRecoveryPending(value) {
+    try {
+      sessionStorage.setItem("irctc_server_recovery_pending", value ? "1" : "0");
+    } catch (error) {
+      /* Ignore storage issues on page context. */
+    }
+  }
+
+  function getServerRecoveryPending() {
+    try {
+      return sessionStorage.getItem("irctc_server_recovery_pending") === "1";
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function clearServerRecoveryPending() {
+    try {
+      sessionStorage.removeItem("irctc_server_recovery_pending");
+    } catch (error) {
+      /* Ignore storage issues on page context. */
     }
   }
 
@@ -2556,7 +2906,15 @@
         "padding:20px"
       ].join(";");
 
-      const passengerNames = (journeyConfig.selectedPassengers || []).map((passenger) => passenger.fullName).join(", ");
+      const passengerDetails = (journeyConfig.selectedPassengers || []).map((passenger, index) => `
+        <div style="padding:10px 12px;border-radius:14px;background:#fff;border:1px solid #e3e8ff;">
+          <div><strong>Passenger ${index + 1}:</strong> ${escapeHtml(passenger.fullName)}</div>
+          <div>Age / Gender: ${escapeHtml(`${passenger.age} / ${passenger.gender}`)}</div>
+          <div>Berth: ${escapeHtml(passenger.berthPreference || "No Preference")}</div>
+          <div>ID Proof: ${escapeHtml(passenger.idProofType || "Not set")} ${passenger.idProofNumber ? `(${escapeHtml(passenger.idProofNumber)})` : ""}</div>
+          <div>Senior Concession: ${passenger.seniorConcession || passenger.age >= 60 ? "Yes" : "No"}</div>
+        </div>
+      `).join("");
       const panel = document.createElement("div");
       panel.style.cssText = [
         "max-width:520px",
@@ -2575,8 +2933,15 @@
           <div><strong>Route:</strong> ${escapeHtml(journeyConfig.fromStation)} -> ${escapeHtml(journeyConfig.toStation)}</div>
           <div><strong>Date:</strong> ${escapeHtml(journeyConfig.journeyDate)}</div>
           <div><strong>Class / Quota:</strong> ${escapeHtml(`${journeyConfig.journeyClass} / ${journeyConfig.quota}`)}</div>
-          <div><strong>Passengers:</strong> ${escapeHtml(passengerNames)}</div>
+          <div style="display:grid;gap:8px;">
+            <strong>Passengers</strong>
+            ${passengerDetails}
+          </div>
           <div><strong>Insurance:</strong> ${journeyConfig.preferences?.travelInsurance ? "Yes" : "No"}</div>
+          <div><strong>Auto Upgrade:</strong> ${journeyConfig.preferences?.autoUpgrade ? "Yes" : "No"}</div>
+          <div><strong>Confirmed Berths Only:</strong> ${journeyConfig.preferences?.onlyConfirmBerths ? "Yes" : "No"}</div>
+          <div><strong>Reservation Choice:</strong> ${escapeHtml(journeyConfig.preferences?.reservationChoice || "Not set")}</div>
+          <div><strong>Preferred Coach:</strong> ${escapeHtml(journeyConfig.preferences?.preferredCoach || "Not set")}</div>
           <div><strong>Payment Mode:</strong> ${escapeHtml(journeyConfig.preferences?.paymentMode || "")}</div>
         </div>
         <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px;">

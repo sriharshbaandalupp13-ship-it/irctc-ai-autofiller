@@ -773,12 +773,23 @@
   }
 
   async function refreshTatkalAlarmStatus() {
-    const alarm = await chrome.alarms.get("tatkal-start");
-    if (!alarm) {
+    const alarms = await chrome.alarms.getAll();
+    const tatkalAlarms = alarms
+      .filter((alarm) => [
+        "tatkal-start",
+        "tatkal-reminder",
+        "tatkal-pre-position",
+        "tatkal-start-sleeper",
+        "tatkal-reminder-sleeper",
+        "tatkal-pre-position-sleeper"
+      ].includes(alarm.name))
+      .sort((left, right) => left.scheduledTime - right.scheduledTime);
+    if (!tatkalAlarms.length) {
       elements.tatkalAlarmStatus.textContent = "❌ No alarm set";
       return;
     }
-    const when = new Date(alarm.scheduledTime);
+    const nextAlarm = tatkalAlarms[0];
+    const when = new Date(nextAlarm.scheduledTime);
     const dayLabel = isTomorrow(when) ? "tomorrow" : when.toLocaleDateString();
     const timeLabel = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     elements.tatkalAlarmStatus.textContent = `⏰ Alarm set for ${dayLabel} ${timeLabel}`;
@@ -872,8 +883,15 @@
           }
         });
       } catch (error) {
-        await chrome.alarms.create("tatkal-start", { when: schedule.startAt.getTime() });
-        await chrome.alarms.create("tatkal-reminder", { when: schedule.reminderAt.getTime() });
+        const startName = tatkalClassType === "sleeper" ? "tatkal-start-sleeper" : "tatkal-start";
+        const reminderName = tatkalClassType === "sleeper" ? "tatkal-reminder-sleeper" : "tatkal-reminder";
+        await chrome.alarms.create(startName, { when: schedule.startAt.getTime() });
+        await chrome.alarms.create(reminderName, { when: schedule.reminderAt.getTime() });
+        if (tatkalClassType === "both") {
+          const sleeperSchedule = buildTatkalScheduleForType("sleeper", journeyConfig);
+          await chrome.alarms.create("tatkal-start-sleeper", { when: sleeperSchedule.startAt.getTime() });
+          await chrome.alarms.create("tatkal-reminder-sleeper", { when: sleeperSchedule.reminderAt.getTime() });
+        }
       }
 
       state.tatkalRushConfig = {
@@ -906,6 +924,10 @@
       } catch (error) {
         await chrome.alarms.clear("tatkal-start");
         await chrome.alarms.clear("tatkal-reminder");
+        await chrome.alarms.clear("tatkal-pre-position");
+        await chrome.alarms.clear("tatkal-start-sleeper");
+        await chrome.alarms.clear("tatkal-reminder-sleeper");
+        await chrome.alarms.clear("tatkal-pre-position-sleeper");
       }
 
       state.tatkalRushConfig = {
