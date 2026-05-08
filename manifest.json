@@ -1,15 +1,15 @@
-{
+﻿{
   "manifest_version": 3,
   "name": "IRCTC AutoFill Assistant",
   "version": "1.0.0",
-  "description": "Automates the IRCTC booking flow up to the payment page with saved passengers, Tatkal scheduling, availability checks, history, and Gemini-powered selector recovery.",
+  "description": "Automates IRCTC booking flow up to payment with Tatkal scheduling, passenger profiles, and Gemini selector fallback.",
   "permissions": [
+    "activeTab",
     "storage",
-    "tabs",
     "scripting",
+    "tabs",
     "alarms",
-    "notifications",
-    "activeTab"
+    "notifications"
   ],
   "host_permissions": [
     "https://www.irctc.co.in/*",
@@ -17,10 +17,6 @@
   ],
   "background": {
     "service_worker": "background.js"
-  },
-  "action": {
-    "default_title": "IRCTC AutoFill Assistant",
-    "default_popup": "popup.html"
   },
   "options_page": "options.html",
   "content_scripts": [
@@ -35,16 +31,8 @@
       "run_at": "document_idle"
     }
   ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "utils.js",
-        "popup.css",
-        "options.css"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
-    }
-  ]
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "IRCTC AutoFill Assistant"
+  }
 }

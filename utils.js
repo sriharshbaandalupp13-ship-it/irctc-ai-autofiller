@@ -1,471 +1,262 @@
-/* eslint-disable no-var */
-/* Removed IIFE wrapper for Chrome MV3 service worker importScripts compatibility */
+﻿const STORAGE_KEYS = {
+  ACTIVE_BOOKING: "ACTIVE_BOOKING",
+  BOOKING_CHECKPOINT: "BOOKING_CHECKPOINT",
+  LOGIN_CREDS: "LOGIN_CREDS",
+  AUTO_LOGIN: "AUTO_LOGIN",
+  TATKAL_RUSH_CONFIG: "TATKAL_RUSH_CONFIG",
+  PASSENGERS: "PASSENGERS",
+  DEFAULT_PREFERENCES: "DEFAULT_PREFERENCES",
+  BOOKING_HISTORY: "BOOKING_HISTORY",
+  AVAILABILITY_ALERTS: "AVAILABILITY_ALERTS",
+  GEMINI_API_KEY: "GEMINI_API_KEY"
+};
 
-var STORAGE_KEYS = {
-    PASSENGERS: "passengers",
-    GROUPS: "groups",
-    SAVED_STATIONS: "savedStations",
-    DEFAULT_PREFERENCES: "defaultPreferences",
-    BOOKING_HISTORY: "bookingHistory",
-    GEMINI_API_KEY: "geminiApiKey",
-    TATKAL_RUSH_CONFIG: "tatkalRushConfig",
-    AVAILABILITY_ALERTS: "availabilityAlerts",
-    JOURNEY_DRAFT: "journeyDraft",
-    ACTIVE_BOOKING: "activeBooking",
-    RUNTIME_STATUS: "runtimeStatus",
-    LATEST_RECOMMENDATION: "latestRecommendation",
-    PENDING_AVAILABILITY_REQUEST: "pendingAvailabilityRequest",
-    SIDEBAR_STATE: "sidebarState",
-    QUICK_WIDGET_SETTINGS: "quickWidgetSettings",
-    BOOKING_CHECKPOINT: "bookingCheckpoint",
-    LOGIN_CREDS: "loginCreds",
-    AUTO_LOGIN: "autoLogin"
-  };
+function humanDelay(min = 100, max = 300) {
+  const ms = Math.max(0, Math.floor(Math.random() * (max - min + 1)) + min);
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  var DEFAULT_PREFERENCES = {
-    travelInsurance: true,
-    autoUpgrade: false,
-    onlyConfirmBerths: false,
-    paymentMode: "BHIM UPI",
-    preferredCoach: "",
-    reservationChoice: "",
-    fallbackMobile: ""
-  };
+function normalizeText(str) {
+  return String(str || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
 
-  var DEFAULT_QUICK_WIDGET_SETTINGS = {
-    selectionMode: "family",
-    favoriteFromStation: "",
-    favoriteToStation: "",
-    favoriteGroupId: "",
-    favoritePassengerId: ""
-  };
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
-  var QUOTAS = [
-    "General",
-    "Tatkal",
-    "Ladies",
-    "Senior Citizen",
-    "Premium Tatkal"
-  ];
-
-  var JOURNEY_CLASSES = ["SL", "3A", "2A", "1A", "All Classes"];
-
-  var PAYMENT_MODES = ["BHIM UPI", "Credit & Debit Card", "Net Banking"];
-
-  var BERTH_PREFERENCES = [
-    "Lower",
-    "Middle",
-    "Upper",
-    "Side Lower",
-    "Side Upper",
-    "No Preference"
-  ];
-
-  var GENDERS = ["Male", "Female", "Transgender"];
-
-  var ID_PROOF_TYPES = [
-    "Aadhaar",
-    "PAN",
-    "Passport",
-    "Driving License",
-    "Voter ID"
-  ];
-
-  var NATIONALITY_DEFAULT = "India";
-
-  var IRCTC_URLS = {
-    SEARCH: "https://www.irctc.co.in/nget/train-search",
-    TRAIN_LIST: "https://www.irctc.co.in/nget/train-list",
-    PAX_DETAILS: "https://www.irctc.co.in/nget/booking/pax-details",
-    PAYMENT: "https://www.irctc.co.in/nget/booking/payment"
-  };
-
-  function clone(value) {
-    return JSON.parse(JSON.stringify(value));
+function isVisible(el) {
+  if (!el || el.nodeType !== 1) {
+    return false;
   }
-
-  function normalizeText(value) {
-    return String(value || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .toLowerCase();
+  if (!document.contains(el)) {
+    return false;
   }
-
-  function titleCase(value) {
-    return String(value || "")
-      .toLowerCase()
-      .replace(/\b\w/g, (char) => char.toUpperCase());
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) {
+    return false;
   }
-
-  function todayISO() {
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
-    return `${now.getFullYear()}-${month}-${day}`;
+  if (el.hidden) {
+    return false;
   }
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
 
-  function randomBetween(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+function clone(obj) {
+  try {
+    return JSON.parse(JSON.stringify(obj));
+  } catch (error) {
+    return null;
   }
+}
 
-  function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function dispatchChangeEvents(element) {
+  if (!element) {
+    return;
   }
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+}
 
-  async function humanDelay(min = 100, max = 300) {
-    await sleep(randomBetween(min, max));
+async function clearAndType(element, text) {
+  if (!element) {
+    return;
   }
-
-  function dispatchAllEvents(element) {
-    if (!element) {
-      return;
-    }
-    ["input", "change", "blur"].forEach((eventName) => {
-      element.dispatchEvent(new Event(eventName, { bubbles: true }));
-    });
+  const value = String(text || "");
+  element.focus();
+  if (typeof element.select === "function") {
+    element.select();
   }
-
-  async function clearAndType(element, value, options = {}) {
-    if (!element) {
-      return;
-    }
-    const text = String(value ?? "");
-    const {
-      minDelay = 35,
-      maxDelay = 75,
-      skipClick = false,
-      skipSelect = false
-    } = options;
-
-    if (!skipClick && typeof element.click === "function") {
-      element.click();
-    }
-    element.focus();
-
-    if (!skipSelect && typeof element.select === "function") {
-      element.select();
-    }
-
-    // Use native setter to ensure the value is cleared and updated correctly
-    // bypassing any framework-level value interception (like Angular/React).
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      (element instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement).prototype,
-      "value"
-    )?.set;
-
-    if (nativeSetter) {
-      nativeSetter.call(element, "");
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "value")?.set;
+  if (setter) {
+    setter.call(element, "");
+  } else {
+    element.value = "";
+  }
+  dispatchChangeEvents(element);
+  for (const char of value) {
+    const current = element.value + char;
+    if (setter) {
+      setter.call(element, current);
     } else {
-      element.value = "";
+      element.value = current;
     }
-    
-    dispatchAllEvents(element);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    await humanDelay(40, 110);
+  }
+}
 
-    for (const char of text) {
-      const currentVal = element.value;
-      if (nativeSetter) {
-        nativeSetter.call(element, currentVal + char);
-      } else {
-        element.value = currentVal + char;
-      }
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
-      await sleep(randomBetween(minDelay, maxDelay));
+async function safeSendRuntimeMessage(msg) {
+  try {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      return null;
     }
-
-    dispatchAllEvents(element);
-  }
-
-  function getChromeStorage() {
-    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-      return chrome.storage.local;
-    }
-    throw new Error("chrome.storage.local is unavailable");
-  }
-
-  async function getStorage(keys) {
-    return getChromeStorage().get(keys);
-  }
-
-  async function setStorage(values) {
-    return getChromeStorage().set(values);
-  }
-
-  async function removeStorage(keys) {
-    return getChromeStorage().remove(keys);
-  }
-
-  async function getDataBundle() {
-    const data = await getStorage([
-      STORAGE_KEYS.PASSENGERS,
-      STORAGE_KEYS.GROUPS,
-      STORAGE_KEYS.SAVED_STATIONS,
-      STORAGE_KEYS.DEFAULT_PREFERENCES,
-      STORAGE_KEYS.BOOKING_HISTORY,
-      STORAGE_KEYS.GEMINI_API_KEY,
-      STORAGE_KEYS.TATKAL_RUSH_CONFIG,
-      STORAGE_KEYS.AVAILABILITY_ALERTS,
-      STORAGE_KEYS.JOURNEY_DRAFT,
-      STORAGE_KEYS.ACTIVE_BOOKING,
-      STORAGE_KEYS.RUNTIME_STATUS,
-      STORAGE_KEYS.LATEST_RECOMMENDATION,
-      STORAGE_KEYS.QUICK_WIDGET_SETTINGS,
-      STORAGE_KEYS.BOOKING_CHECKPOINT,
-      STORAGE_KEYS.LOGIN_CREDS,
-      STORAGE_KEYS.AUTO_LOGIN
-    ]);
-
-    return {
-      passengers: Array.isArray(data[STORAGE_KEYS.PASSENGERS]) ? data[STORAGE_KEYS.PASSENGERS] : [],
-      groups: Array.isArray(data[STORAGE_KEYS.GROUPS]) ? data[STORAGE_KEYS.GROUPS] : [],
-      savedStations: Array.isArray(data[STORAGE_KEYS.SAVED_STATIONS]) ? data[STORAGE_KEYS.SAVED_STATIONS] : [],
-      defaultPreferences: {
-        ...clone(DEFAULT_PREFERENCES),
-        ...(data[STORAGE_KEYS.DEFAULT_PREFERENCES] || {})
-      },
-      bookingHistory: Array.isArray(data[STORAGE_KEYS.BOOKING_HISTORY]) ? data[STORAGE_KEYS.BOOKING_HISTORY] : [],
-      geminiApiKey: data[STORAGE_KEYS.GEMINI_API_KEY] || "",
-      tatkalRushConfig: data[STORAGE_KEYS.TATKAL_RUSH_CONFIG] || null,
-      availabilityAlerts: Array.isArray(data[STORAGE_KEYS.AVAILABILITY_ALERTS]) ? data[STORAGE_KEYS.AVAILABILITY_ALERTS] : [],
-      journeyDraft: data[STORAGE_KEYS.JOURNEY_DRAFT] || null,
-      activeBooking: data[STORAGE_KEYS.ACTIVE_BOOKING] || null,
-      runtimeStatus: data[STORAGE_KEYS.RUNTIME_STATUS] || null,
-      latestRecommendation: data[STORAGE_KEYS.LATEST_RECOMMENDATION] || null,
-      bookingCheckpoint: data[STORAGE_KEYS.BOOKING_CHECKPOINT] || null,
-      loginCreds: data[STORAGE_KEYS.LOGIN_CREDS] || null,
-      autoLogin: Boolean(data[STORAGE_KEYS.AUTO_LOGIN]),
-      quickWidgetSettings: {
-        ...clone(DEFAULT_QUICK_WIDGET_SETTINGS),
-        ...(data[STORAGE_KEYS.QUICK_WIDGET_SETTINGS] || {})
-      }
-    };
-  }
-
-  function generateId(prefix = "id") {
-    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  }
-
-  function buildJourneyConfig(raw = {}) {
-    const preferences = {
-      ...clone(DEFAULT_PREFERENCES),
-      ...(raw.preferences || {})
-    };
-
-    const passengers = Array.isArray(raw.selectedPassengers) ? raw.selectedPassengers : [];
-
-    const fallbackClassOrder = Array.isArray(raw.fallbackClassOrder) && raw.fallbackClassOrder.length
-      ? raw.fallbackClassOrder
-      : ["3A", "2A", "SL", "1A"];
-
-    return {
-      id: raw.id || generateId("journey"),
-      fromStation: raw.fromStation || "",
-      toStation: raw.toStation || "",
-      journeyDate: raw.journeyDate || todayISO(),
-      journeyClass: raw.journeyClass || "3A",
-      quota: raw.quota || "General",
-      passengerCount: Math.max(1, Math.min(6, Number(raw.passengerCount) || passengers.length || 1)),
-      selectedPassengerIds: Array.isArray(raw.selectedPassengerIds) ? raw.selectedPassengerIds : passengers.map((passenger) => passenger.id),
-      selectedPassengers: passengers.slice(0, 6),
-      preferredTrain: String(raw.preferredTrain || "").trim(),
-      fallbackClassOrder,
-      preferences,
-      tatkalRushMode: Boolean(raw.tatkalRushMode),
-      autoSelectTrain: Boolean(raw.autoSelectTrain || raw.metadata?.autoSelectTrain),
-      tatkalClassType: raw.tatkalClassType || raw.metadata?.tatkalClassType || "",
-      metadata: raw.metadata || {},
-      createdAt: raw.createdAt || new Date().toISOString()
-    };
-  }
-
-  function computeTatkalTime(config) {
-    const journeyClass = normalizeText(config?.journeyClass);
-    const isSleeper = journeyClass === "sl" || journeyClass === "sleeper";
-    const openingHour = isSleeper ? 11 : 10;
-    const reminderHour = isSleeper ? 10 : 9;
-    const reminderMinute = 55;
-
-    const now = new Date();
-    const startAt = new Date(now);
-    startAt.setHours(openingHour, 0, 0, 0);
-
-    const reminderAt = new Date(now);
-    reminderAt.setHours(reminderHour, reminderMinute, 0, 0);
-
-    if (startAt <= now) {
-      startAt.setDate(startAt.getDate() + 1);
-    }
-    if (reminderAt <= now) {
-      reminderAt.setDate(reminderAt.getDate() + 1);
-    }
-
-    return {
-      startAt,
-      reminderAt,
-      slotLabel: isSleeper ? "11:00:00 AM" : "10:00:00 AM"
-    };
-  }
-
-  function summarizeConfig(config) {
-    if (!config) {
-      return "No active journey";
-    }
-    const passengerNames = (config.selectedPassengers || []).map((passenger) => passenger.fullName).join(", ");
-    return `${config.fromStation} -> ${config.toStation} | ${config.journeyDate} | ${config.journeyClass} | ${passengerNames || `${config.passengerCount} passenger(s)`}`;
-  }
-
-  function upsertSavedStations(existing = [], values = []) {
-    const merged = new Map();
-    [...existing, ...values]
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)
-      .forEach((value) => {
-        merged.set(normalizeText(value), value);
+    return await new Promise((resolve) => {
+      chrome.runtime.sendMessage(msg, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn("safeSendRuntimeMessage error", chrome.runtime.lastError.message);
+          return resolve(null);
+        }
+        resolve(response);
       });
-    return Array.from(merged.values()).slice(0, 100);
+    });
+  } catch (error) {
+    return null;
   }
+}
 
-  function createStatusStep(label, state = "pending", detail = "") {
-    return {
-      id: generateId("step"),
-      label,
-      state,
-      detail,
-      timestamp: new Date().toISOString()
-    };
+function serializeDomForGemini(rootEl) {
+  const root = rootEl || document.documentElement;
+  const nodes = Array.from(root.querySelectorAll("input,button,select,textarea,label,a,div,span"))
+    .slice(0, 120)
+    .map((node) => ({
+      tag: node.tagName.toLowerCase(),
+      id: node.id || "",
+      name: node.name || node.getAttribute("name") || "",
+      type: node.type || "",
+      text: normalizeText(node.textContent || node.innerText || ""),
+      placeholder: node.getAttribute("placeholder") || "",
+      ariaLabel: node.getAttribute("aria-label") || node.getAttribute("role") || "",
+      className: node.className ? String(node.className).slice(0, 120) : ""
+    }));
+  return JSON.stringify(nodes);
+}
+
+async function findWithGeminiFallback(description, context) {
+  const response = await safeSendRuntimeMessage({ type: "CALL_GEMINI", prompt: description, domContext: context });
+  if (!response || typeof response.selector !== "string") {
+    return null;
   }
+  return response.selector;
+}
 
-  function formatTimestamp(value) {
+function scoreTrainRecommendation(trainCard, config) {
+  if (!trainCard) {
+    return 0;
+  }
+  const text = normalizeText(trainCard.textContent || "");
+  let score = 0;
+  const availabilityMatch = text.match(/(\d+)\s*(?:seats?|available|avail)/i);
+  const availableCount = availabilityMatch ? Number(availabilityMatch[1]) : 0;
+  score += Math.min(availableCount, 50) * 4;
+  const preferredClass = String(config?.journeyClass || "").trim().toUpperCase();
+  if (preferredClass) {
+    const classButton = Array.from(trainCard.querySelectorAll("button,span,a,div")).find((node) => normalizeText(node.textContent || "") === normalizeText(preferredClass));
+    if (classButton && isVisible(classButton) && !classButton.disabled) {
+      score += 120;
+    }
+  }
+  const timeMatch = text.match(/(\d{1,2}:\d{2})/);
+  if (timeMatch) {
+    const [hour, minute] = timeMatch[1].split(":").map(Number);
+    if (!Number.isNaN(hour) && !Number.isNaN(minute)) {
+      const minutes = hour * 60 + minute;
+      const preferredMinutes = 10 * 60;
+      score += Math.max(0, 120 - Math.abs(minutes - preferredMinutes));
+    }
+  }
+  if (text.includes("train")) {
+    score += 20;
+  }
+  return score;
+}
+
+async function withRetry(asyncFn, stepName, maxRetries = 3) {
+  let attempt = 0;
+  let lastError = null;
+  while (attempt < maxRetries) {
     try {
-      return new Date(value).toLocaleString();
+      return await asyncFn();
     } catch (error) {
-      return String(value || "");
+      lastError = error;
+      attempt += 1;
+      if (attempt >= maxRetries) {
+        showContentToast(`Permanent failure: ${stepName}. ${error?.message || error}`, "error", true, 0);
+        if (window.contentState && typeof window.contentState === "object") {
+          window.contentState.activeConfig = null;
+        }
+        throw error;
+      }
+      const backoff = attempt === 1 ? 2000 : attempt === 2 ? 5000 : 12000;
+      await humanDelay(backoff, backoff + 400);
     }
   }
+  throw lastError;
+}
 
-  function serializeDomForGemini(root = document) {
-    const nodes = Array.from(root.querySelectorAll("input, button, select, textarea, label, [role='button'], [role='option'], [aria-label], [placeholder]"))
-      .slice(0, 160)
-      .map((node) => ({
-        tag: node.tagName.toLowerCase(),
-        id: node.id || "",
-        name: node.getAttribute("name") || "",
-        type: node.getAttribute("type") || "",
-        text: (node.textContent || "").trim().slice(0, 80),
-        placeholder: node.getAttribute("placeholder") || "",
-        ariaLabel: node.getAttribute("aria-label") || "",
-        className: (node.className || "").toString().slice(0, 120)
-      }));
-    return JSON.stringify(nodes, null, 2);
-  }
-
-  async function callGeminiSelector({ apiKey, purpose, domSummary, url, selectorHints = [] }) {
-    if (!apiKey) {
-      throw new Error("Gemini API key is missing");
+function showContentToast(message, type = "info", dismissable = false, duration = 8000) {
+  try {
+    let toast = document.getElementById("irctc-autofill-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "irctc-autofill-toast";
+      toast.style.cssText = "position:fixed;bottom:20px;right:20px;max-width:320px;padding:14px 16px;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.22);font:13px/1.4 sans-serif;z-index:99999999;";
+      document.body.appendChild(toast);
     }
-
-    const prompt = [
-      "You help a Chrome extension recover a CSS selector on a live webpage.",
-      `Goal: ${purpose}`,
-      `URL: ${url}`,
-      selectorHints.length ? `Known selector hints: ${selectorHints.join(", ")}` : "No selector hints available.",
-      "Return strict JSON only in the form: {\"selector\":\"...\",\"reason\":\"...\"}.",
-      "Choose a CSS selector likely to uniquely match the correct interactive element.",
-      "DOM summary:",
-      domSummary
-    ].join("\n");
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${encodeURIComponent(apiKey)}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }]
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini request failed with ${response.status}`);
+    toast.textContent = message;
+    toast.style.background = type === "error" ? "#D32F2F" : type === "success" ? "#2E7D32" : type === "warning" ? "#F9A825" : "#1976D2";
+    toast.style.color = "#fff";
+    toast.style.opacity = "1";
+    toast.style.cursor = dismissable ? "pointer" : "default";
+    if (dismissable) {
+      toast.onclick = () => {
+        toast.style.opacity = "0";
+        setTimeout(() => toast.remove(), 250);
+      };
+    } else {
+      toast.onclick = null;
     }
-
-    const payload = await response.json();
-    const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleaned);
+    if (!dismissable) {
+      clearTimeout(showContentToast._timer);
+      showContentToast._timer = setTimeout(() => {
+        toast.style.opacity = "0";
+        setTimeout(() => toast.remove(), 250);
+      }, duration);
+    }
+  } catch (error) {
+    console.warn("showContentToast failed", error);
   }
+}
 
-  function scoreTrainRecommendation(trains = [], preferredClass = "3A") {
-    const normalizedClass = normalizeText(preferredClass);
-    let best = null;
+async function getStorage(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(keys, (items) => resolve(items || {}));
+  });
+}
 
-    trains.forEach((train) => {
-      const availabilityText = normalizeText(train.availability?.[preferredClass] || train.availability?.[preferredClass.toUpperCase()] || "");
-      const departure = train.departure || "";
-      const departureHour = /^\d{2}:\d{2}$/.test(departure) ? Number(departure.split(":")[0]) : 12;
-      let score = 0;
+async function setStorage(data) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set(data, () => resolve());
+  });
+}
 
-      if (/available|avl/.test(availabilityText)) {
-        score += 50;
-      }
-      if (/wl|regret|not available/.test(availabilityText)) {
-        score -= 40;
-      }
-      score += Math.max(0, 20 - Math.abs(8 - departureHour));
-      if (normalizedClass && normalizeText(Object.keys(train.availability || {}).join(" ")).includes(normalizedClass)) {
-        score += 12;
-      }
-      if ((train.trainName || "").toLowerCase().includes("rajdhani") || (train.trainName || "").toLowerCase().includes("vande")) {
-        score += 5;
-      }
+async function removeStorage(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(keys, () => resolve());
+  });
+}
 
-      if (!best || score > best.score) {
-        best = {
-          score,
-          train
-        };
-      }
-    });
-
-    return best;
-  }
-
-  globalThis.IRCTCUtils = {
-    STORAGE_KEYS,
-    DEFAULT_PREFERENCES,
-    DEFAULT_QUICK_WIDGET_SETTINGS,
-    QUOTAS,
-    JOURNEY_CLASSES,
-    PAYMENT_MODES,
-    BERTH_PREFERENCES,
-    GENDERS,
-    ID_PROOF_TYPES,
-    NATIONALITY_DEFAULT,
-    IRCTC_URLS,
-    normalizeText,
-    titleCase,
-    todayISO,
-    randomBetween,
-    sleep,
-    humanDelay,
-    clearAndType,
-    dispatchAllEvents,
-    getStorage,
-    setStorage,
-    removeStorage,
-    getDataBundle,
-    generateId,
-    buildJourneyConfig,
-    computeTatkalTime,
-    summarizeConfig,
-    upsertSavedStations,
-    createStatusStep,
-    formatTimestamp,
-    serializeDomForGemini,
-    callGeminiSelector,
-    scoreTrainRecommendation,
-    clone
-  };
+window.IRCTCUtils = {
+  STORAGE_KEYS,
+  humanDelay,
+  clearAndType,
+  findWithGeminiFallback,
+  normalizeText,
+  serializeDomForGemini,
+  isVisible,
+  escapeHtml,
+  safeSendRuntimeMessage,
+  clone,
+  scoreTrainRecommendation,
+  withRetry,
+  showContentToast,
+  getStorage,
+  setStorage,
+  removeStorage
+};
