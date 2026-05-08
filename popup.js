@@ -125,7 +125,13 @@
       });
     });
 
-    elements.openOptionsButton.addEventListener("click", () => sendMessage({ type: "OPEN_OPTIONS" }));
+    elements.openOptionsButton.addEventListener("click", async () => {
+      try {
+        await chrome.runtime.openOptionsPage();
+      } catch (error) {
+        await sendMessage({ type: "OPEN_OPTIONS" });
+      }
+    });
     elements.resumeBookingButton.addEventListener("click", resumeLastBooking);
     elements.saveConfigButton.addEventListener("click", saveSetup);
     elements.startBookingButton.addEventListener("click", startBooking);
